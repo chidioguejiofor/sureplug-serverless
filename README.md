@@ -26,12 +26,14 @@ away.
 
 What this pipeline actually does:
 
-1. **BlurCheck** *(the only stage implemented so far)* - rejects
-   too-blurry uploads before paying for the far more expensive background-
-   removal stage.
-2. **RemoveBackground** *(not yet implemented)* - a lean OSS segmentation
-   model via a serverless-GPU host (Replicate-class), submitted with a
-   webhook so the state machine doesn't poll.
+1. **BlurCheck** - rejects too-blurry uploads before paying for the far more
+   expensive background-removal stage.
+2. **RemoveBackground** - a lean OSS segmentation model via a serverless-GPU
+   host (Replicate), submitted with a webhook so the state machine doesn't
+   poll (`.waitForTaskToken`: `removeBackground` submits the prediction and
+   returns immediately; `removeBackgroundCallback`, invoked by Replicate's
+   webhook via HTTP API, verifies the webhook signature and resolves the
+   waiting Step Functions task with `SendTaskSuccess`/`SendTaskFailure`).
 3. **CompositeAndCrop** *(not yet implemented)* - onto a neutral background,
    cropped from the segmentation mask's bounding box.
 4. **Upscale** *(conditional, not yet implemented)* - only when the
@@ -43,6 +45,34 @@ What this pipeline actually does:
    `sureplug-backend`'s `POST /media/internal/pipeline-result` with the
    outcome (`READY` + the rendered variants, or `NEEDS_REUPLOAD` + a reason),
    authenticated with a shared secret header.
+
+## RemoveBackground correlation & webhook verification
+
+Step Functions' `.waitForTaskToken` pattern needs the eventual webhook call to
+carry back the task token for the specific execution it belongs to.
+`removeBackground` embeds it (plus `fileId`) as query params on the callback
+URL it hands Replicate as the `webhook`. **This assumes Replicate calls back
+the URL exactly as given, query string included** - their docs confirm the
+call is a POST to "that URL" but don't explicitly confirm query-string
+preservation. Worth a real sandbox test before trusting this in production;
+if it turns out otherwise, the fallback is encoding the token into the URL
+*path* instead (`/webhooks/remove-background/<taskToken>`), which is
+unambiguously preserved.
+
+`removeBackgroundCallback` verifies every inbound call is genuinely from
+Replicate before trusting it (`replicate-webhook.ts`) - HMAC-SHA256 over
+`{webhook-id}.{webhook-timestamp}.{raw body}` using the signing secret
+(`REPLICATE_WEBHOOK_SECRET` - fetch once via
+`GET https://api.replicate.com/v1/webhooks/default/secret`, see
+`.env-example`), checked against every space-delimited signature in the
+`webhook-signature` header with a constant-time comparison, plus a 5-minute
+timestamp tolerance against replay. This is a different situation from
+`sureplug-backend`'s own internal webhook (a shared-secret header, chosen
+there specifically to avoid Express's raw-body-parsing complexity) - API
+Gateway hands a Lambda the raw body directly with no global body-parser in
+the way, so doing real signature verification here has no equivalent
+friction, and Replicate is a third party we don't control the way we control
+our own Lambda-to-Express hop.
 
 ## Setup
 
@@ -81,5 +111,7 @@ developing on.
 Defined in `serverless.yml` via the `serverless-step-functions` plugin
 (`stepFunctions.stateMachines.mediaPipeline`), not a separate ASL file - keeps
 the state machine and the Lambda definitions it references in one place.
-Currently just `BlurCheck` - each stage above gets added as its own Lambda +
-state as it's implemented.
+Currently `BlurCheck` and `RemoveBackground` (which waits on a callback that
+has no further pipeline stage to hand off to yet - it's wired but the state
+machine ends right after) - each remaining stage above gets added as its own
+Lambda + state as it's implemented.

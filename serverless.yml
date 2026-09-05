@@ -15,6 +15,7 @@ provider:
     BACKGROUND_REMOVAL_MODEL_VERSION: ${env:BACKGROUND_REMOVAL_MODEL_VERSION}
     REMOVE_BACKGROUND_CALLBACK_BASE_URL: ${env:REMOVE_BACKGROUND_CALLBACK_BASE_URL}
     SOURCE_IMAGE_URL_TTL_SECONDS: ${env:SOURCE_IMAGE_URL_TTL_SECONDS, '900'}
+    REPLICATE_WEBHOOK_SECRET: ${env:REPLICATE_WEBHOOK_SECRET}
   iam:
     role:
       statements:
@@ -22,6 +23,11 @@ provider:
           Action:
             - s3:GetObject
           Resource: 'arn:aws:s3:::${env:MEDIA_S3_BUCKET}/*'
+        - Effect: Allow
+          Action:
+            - states:SendTaskSuccess
+            - states:SendTaskFailure
+          Resource: '*'
 
 plugins:
   - serverless-esbuild
@@ -46,6 +52,12 @@ functions:
   removeBackground:
     handler: src/functions/remove-background/handler.handler
     timeout: 15
+  removeBackgroundCallback:
+    handler: src/functions/remove-background-callback/handler.handler
+    events:
+      - httpApi:
+          path: /webhooks/remove-background
+          method: post
 
 stepFunctions:
   stateMachines:

@@ -12,3 +12,5 @@ export const REMOVE_BACKGROUND_CALLBACK_BASE_URL = process.env
 export const SOURCE_IMAGE_URL_TTL_SECONDS = Number(
   process.env.SOURCE_IMAGE_URL_TTL_SECONDS || 900
 );
+export const REPLICATE_WEBHOOK_SECRET = process.env
+  .REPLICATE_WEBHOOK_SECRET as string;
