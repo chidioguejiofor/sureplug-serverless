@@ -1,0 +1,66 @@
+service: sureplug-media-pipeline
+
+frameworkVersion: '4'
+
+provider:
+  name: aws
+  runtime: nodejs22.x
+  architecture: arm64
+  region: ${env:AWS_REGION, 'eu-west-2'}
+  stage: ${opt:stage, 'dev'}
+  environment:
+    MEDIA_S3_BUCKET: ${env:MEDIA_S3_BUCKET}
+    BLUR_SCORE_THRESHOLD: ${env:BLUR_SCORE_THRESHOLD, '100'}
+  iam:
+    role:
+      statements:
+        - Effect: Allow
+          Action:
+            - s3:GetObject
+          Resource: 'arn:aws:s3:::${env:MEDIA_S3_BUCKET}/*'
+
+plugins:
+  - serverless-esbuild
+  - serverless-step-functions
+
+custom:
+  esbuild:
+    bundle: true
+    minify: false
+    sourcemap: true
+    exclude:
+      - sharp
+    target: node22
+    platform: node
+    packagerOptions:
+      scripts:
+        - npm rebuild sharp --platform=linux --arch=arm64
+
+functions:
+  blurCheck:
+    handler: src/functions/blur-check/handler.handler
+
+stepFunctions:
+  stateMachines:
+    mediaPipeline:
+      name: ${self:service}-${sls:stage}-media-pipeline
+      definition:
+        Comment: SurePlug product-image processing pipeline - blur check is the only stage implemented so far
+        StartAt: BlurCheck
+        States:
+          BlurCheck:
+            Type: Task
+            Resource:
+              Fn::GetAtt: [blurCheck, Arn]
+            Next: CheckBlurResult
+          CheckBlurResult:
+            Type: Choice
+            Choices:
+              - Variable: "$.isBlurry"
+                BooleanEquals: true
+                Next: TooBlurry
+            Default: PipelineNotYetImplemented
+          TooBlurry:
+            Type: Succeed
+          PipelineNotYetImplemented:
+            Type: Succeed
