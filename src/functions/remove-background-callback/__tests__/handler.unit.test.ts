@@ -52,6 +52,7 @@ function buildEvent(
     queryStringParameters: {
       taskToken: "task-token-abc",
       fileId: "file-1",
+      keyPrefix: "merchants/merchant-1/product_images",
       ...overrides.query,
     },
     body: rawBody,
@@ -81,6 +82,7 @@ describe("remove-background-callback handler", () => {
     const [[commandInput]] = sendTaskSuccessMock.mock.calls;
     expect(JSON.parse(commandInput.output)).toEqual({
       fileId: "file-1",
+      keyPrefix: "merchants/merchant-1/product_images",
       outputImageUrl: "https://replicate.delivery/output.png",
     });
   });
@@ -114,6 +116,18 @@ describe("remove-background-callback handler", () => {
     const event = buildEvent(
       { id: "pred-1", status: "succeeded", output: "url" },
       { query: { fileId: "file-1", taskToken: undefined } }
+    );
+
+    const response = await handler(event);
+
+    expect(response.statusCode).toEqual(400);
+    expect(sendMock).not.toHaveBeenCalled();
+  });
+
+  it("returns 400 when keyPrefix is missing from the query string", async () => {
+    const event = buildEvent(
+      { id: "pred-1", status: "succeeded", output: "url" },
+      { query: { keyPrefix: undefined } }
     );
 
     const response = await handler(event);

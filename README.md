@@ -26,22 +26,45 @@ away.
 
 What this pipeline actually does:
 
-1. **BlurCheck** - rejects too-blurry uploads before paying for the far more
-   expensive background-removal stage.
-2. **RemoveBackground** - a lean OSS segmentation model via a serverless-GPU
+1. **ClassifyImage** - not every product image is a raw photo of a product
+   against a messy background. Merchants also upload marketing graphics,
+   infographics, and lifestyle/context shots that are already deliberately
+   composed - running background removal on those would actively wreck them.
+   A cheap Replicate vision-model call (same task-token/webhook pattern as
+   `RemoveBackground`) answers "clean up this background, or keep it as
+   composed" before anything else runs - see "Classifying which images need
+   background removal" below.
+2. **BlurCheck** - only reached for images the classifier says need cleanup;
+   rejects too-blurry uploads before paying for the far more expensive
+   background-removal stage.
+3. **RemoveBackground** - a lean OSS segmentation model via a serverless-GPU
    host (Replicate), submitted with a webhook so the state machine doesn't
    poll (`.waitForTaskToken`: `removeBackground` submits the prediction and
    returns immediately; `removeBackgroundCallback`, invoked by Replicate's
    webhook via HTTP API, verifies the webhook signature and resolves the
    waiting Step Functions task with `SendTaskSuccess`/`SendTaskFailure`).
-3. **CompositeAndCrop** *(not yet implemented)* - onto a neutral background,
-   cropped from the segmentation mask's bounding box.
-4. **Upscale** *(conditional, not yet implemented)* - only when the
-   composited image's long edge is below a quality threshold.
-5. **RenderVariants** *(not yet implemented)* - the fixed size set
-   (`zoom`/`card`/`thumb`, WebP + JPEG) the storefront actually serves,
-   written next to the original under the same `{fileId}/` folder.
-6. **ReportResult** *(not yet implemented)* - calls
+4. **CropSubject** - the background-removal output's alpha channel *is*
+   the segmentation mask (no separate mask file for these models); its
+   bounding box both sanity-checks that a real subject is present (too little
+   opaque area -> `no_product_detected`, too much -> `background_removal_failed`,
+   either routes to `NeedsReupload`) and drives the crop (bounding box + a
+   configurable padding ratio, clamped to the image edges). The result stays a
+   **transparent** cropped cutout, written to `original.png` under the file's
+   own `{keyPrefix}/{fileId}/` folder - see "Why the master stays transparent"
+   below for why this stage doesn't composite onto a background itself.
+5. **Upscale** *(conditional, not yet implemented)* - only when the cropped
+   image's long edge is below a quality threshold.
+6. **RenderVariants** *(not yet implemented)* - the fixed size set
+   (`zoom`/`card`/`thumb`, WebP + JPEG) the storefront actually serves, for
+   *both* paths (an image the classifier said to keep as-is still needs
+   resizing for grids/thumbnails - it just skips straight here instead of
+   going through `RemoveBackground`/`CropSubject` first). This is where
+   `original.png`'s transparency actually gets flattened for the
+   background-removed path - each variant is rendered via
+   `composeOntoNeutralBackground` (already built, not yet wired to a stage)
+   before being resized, so every serving-facing asset is opaque; only the
+   master stays transparent.
+7. **ReportResult** *(not yet implemented)* - calls
    `sureplug-backend`'s `POST /media/internal/pipeline-result` with the
    outcome (`READY` + the rendered variants, or `NEEDS_REUPLOAD` + a reason),
    authenticated with a shared secret header.
@@ -73,6 +96,80 @@ Gateway hands a Lambda the raw body directly with no global body-parser in
 the way, so doing real signature verification here has no equivalent
 friction, and Replicate is a third party we don't control the way we control
 our own Lambda-to-Express hop.
+
+## Classifying which images need background removal
+
+There's no reliable pixel-level heuristic for "messy background that needs
+cleanup" vs. "deliberately composed image that should be kept as-is" -
+background variance, for instance, doesn't separate them (a marketing
+graphic's gradient can have *low* variance; a real product photo's cluttered
+background has *high* variance, same as a busy lifestyle shot). The strongest
+cheap signal - detecting overlaid text - has a real false-positive mode for
+us specifically: plenty of real products have text *on the product itself*
+(packaging, labels, on-screen branding), so "text detected -> skip removal"
+would wrongly skip genuine product photos constantly. This is a semantic
+judgment call, which is exactly what a vision-capable model is good at and no
+pixel heuristic is - so `ClassifyImage` asks one (`image-classification.ts`),
+reusing Replicate rather than adding a new vendor: same API token, same
+`createPrediction`/webhook infrastructure as `RemoveBackground`, just a
+different model version (`IMAGE_CLASSIFIER_MODEL_VERSION`) and a text prompt
+instead of a segmentation task.
+
+`resolveImageClassification` is deliberately biased toward **KEEP** (skip
+background removal) whenever the answer is anything other than an
+unambiguous "CLEAN": an unparseable response, a response mentioning both
+words, or even the Replicate prediction itself failing all resolve to KEEP,
+never to an error that halts the pipeline. That's a deliberate asymmetry -
+running background removal on a marketing graphic actively destroys it
+(visible, bad); skipping removal on a real product photo just leaves that one
+image less polished than it could've been (invisible, much less bad). When
+unsure, prefer the mistake nobody notices.
+
+`classify-image/handler.ts` and `remove-background/handler.ts` now share two
+extracted helpers doing the identical boilerplate each needs:
+`webhook-task-url.ts` (build a callback URL with N query-string params
+embedded - generalized beyond `RemoveBackground`'s original 3, since
+`ClassifyImage`'s callback also needs to pass `bucket`/`rawKey` through to
+whichever stage runs next) and `replicate-webhook-request.ts` (verify the
+inbound signature, extract the task token, hand back every query param plus
+the parsed body) - both callback handlers now just destructure what they
+specifically need and validate its presence themselves.
+
+## Why the master stays transparent
+
+A flat neutral background isn't enough on its own - a light product (white
+sneakers, say) can lose almost all edge definition against a plain white or
+near-white backdrop, because there's no lighting/shadow information in a
+background-removal cutout the way there is in an actual studio photo (that's
+how Amazon-style listings avoid this: professional lighting bakes in a
+natural shadow before the photo is ever touched; a synthetic background
+swap doesn't get that for free). Two things fix this, both in
+`compose-on-neutral-background.ts`:
+
+- **A synthesized contact shadow** - a soft, blurred dark ellipse anchored at
+  the bottom of the subject's bounding box (`contact-shadow.ts` computes the
+  geometry; the actual render is an SVG ellipse + Gaussian blur, composited
+  under the product layer), which grounds the product and gives it a visible
+  edge independent of the product's own color.
+- **A slightly off-white neutral** (`NEUTRAL_BACKGROUND_COLOR`, default
+  `#FAFAFA` rather than pure `#FFFFFF`) - enough separation that a paper-white
+  product doesn't fully disappear at the pixel level, while still reading as
+  "white" to the eye. The design system's `Paper` token
+  (`oklch(.988 .004 95)`) was floated as a candidate for closer visual
+  consistency with the rest of the storefront UI, but converting that to sRGB
+  by hand risked shipping a wrong-but-plausible-looking color as fact, so this
+  defaults to a plain, verifiable off-white instead - switching is a one-line
+  env var change once the real value is confirmed.
+
+Given that, **`CropSubject` deliberately does not composite onto a
+background at all** - `original.png`, the master everything else derives
+from, stays the transparent, cropped cutout. Compositing (background +
+shadow) happens once per rendered variant, in the not-yet-built
+`RenderVariants` stage, via `composeOntoNeutralBackground`. Keeping the
+master transparent means a future backdrop change (a confirmed `Paper` value,
+theme-aware backgrounds, a different shadow style) never requires re-running
+the expensive background-removal stage - only re-rendering variants from the
+master already in S3.
 
 ## Setup
 
@@ -111,7 +208,10 @@ developing on.
 Defined in `serverless.yml` via the `serverless-step-functions` plugin
 (`stepFunctions.stateMachines.mediaPipeline`), not a separate ASL file - keeps
 the state machine and the Lambda definitions it references in one place.
-Currently `BlurCheck` and `RemoveBackground` (which waits on a callback that
-has no further pipeline stage to hand off to yet - it's wired but the state
-machine ends right after) - each remaining stage above gets added as its own
-Lambda + state as it's implemented.
+Currently `ClassifyImage` -> a Choice routing straight to a stand-in
+`KeepAsIs` success state (classifier said KEEP) or on to `BlurCheck` ->
+`RemoveBackground` -> `CropSubject` -> a Choice routing to `NeedsReupload` or
+a stand-in `PipelineNotYetImplemented` success state - each remaining stage
+above gets added as its own Lambda + state as it's implemented, and
+`RenderVariants` will eventually become what both `KeepAsIs` and
+`PipelineNotYetImplemented` actually lead to.

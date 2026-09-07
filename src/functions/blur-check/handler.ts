@@ -8,12 +8,14 @@ const s3 = new S3Client({ region: AWS_REGION });
 export type BlurCheckInput = {
   fileId: string;
   bucket: string;
+  keyPrefix: string;
   rawKey: string;
 };
 
 export type BlurCheckOutput = {
   fileId: string;
   bucket: string;
+  keyPrefix: string;
   rawKey: string;
   blurScore: number;
   isBlurry: boolean;
@@ -40,6 +42,7 @@ export async function handler(
   return {
     fileId: event.fileId,
     bucket: event.bucket,
+    keyPrefix: event.keyPrefix,
     rawKey: event.rawKey,
     blurScore,
     isBlurry: blurScore < BLUR_SCORE_THRESHOLD,

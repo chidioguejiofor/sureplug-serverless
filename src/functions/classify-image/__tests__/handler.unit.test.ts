@@ -10,7 +10,7 @@ vi.mock("../../../shared/replicate-client", () => ({
   createPrediction: createPredictionMock,
 }));
 
-import { handler, buildCallbackWebhookUrl } from "../handler";
+import { handler, buildClassifyCallbackWebhookUrl } from "../handler";
 
 const input = {
   TaskToken: "task-token-abc",
@@ -20,27 +20,27 @@ const input = {
   rawKey: "merchants/merchant-1/product_images/file-1/raw.jpg",
 };
 
-describe("buildCallbackWebhookUrl", () => {
-  it("embeds the task token, fileId and keyPrefix as query params on the callback URL", () => {
-    const url = buildCallbackWebhookUrl(input);
+describe("buildClassifyCallbackWebhookUrl", () => {
+  it("embeds the task token, fileId, keyPrefix, bucket and rawKey as query params", () => {
+    const url = new URL(buildClassifyCallbackWebhookUrl(input));
 
-    expect(url).toContain("/webhooks/remove-background");
-    expect(new URL(url).searchParams.get("taskToken")).toEqual(
-      "task-token-abc"
-    );
-    expect(new URL(url).searchParams.get("fileId")).toEqual("file-1");
-    expect(new URL(url).searchParams.get("keyPrefix")).toEqual(
+    expect(url.pathname).toEqual("/webhooks/classify-image");
+    expect(url.searchParams.get("taskToken")).toEqual("task-token-abc");
+    expect(url.searchParams.get("fileId")).toEqual("file-1");
+    expect(url.searchParams.get("keyPrefix")).toEqual(
       "merchants/merchant-1/product_images"
     );
+    expect(url.searchParams.get("bucket")).toEqual("sureplug-media-test");
+    expect(url.searchParams.get("rawKey")).toEqual(input.rawKey);
   });
 });
 
-describe("remove-background handler", () => {
+describe("classify-image handler", () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
 
-  it("presigns the raw object and submits a Replicate prediction with the callback webhook", async () => {
+  it("presigns the raw object and submits a classification prediction with a prompt", async () => {
     getSignedUrlMock.mockResolvedValueOnce(
       "https://s3.example.test/signed-source"
     );
@@ -54,18 +54,17 @@ describe("remove-background handler", () => {
     expect(createPredictionMock).toHaveBeenCalledWith(
       "test-replicate-token",
       expect.objectContaining({
-        version: "test-model-version",
-        input: { image: "https://s3.example.test/signed-source" },
+        input: expect.objectContaining({
+          image: "https://s3.example.test/signed-source",
+        }),
         webhookEventsFilter: ["completed"],
       })
     );
 
     const call = createPredictionMock.mock.calls[0][1];
+    expect(call.input.prompt).toContain("CLEAN");
+    expect(call.input.prompt).toContain("KEEP");
     expect(call.webhook).toContain("taskToken=task-token-abc");
-    expect(call.webhook).toContain("fileId=file-1");
-    expect(call.webhook).toContain(
-      "keyPrefix=merchants%2Fmerchant-1%2Fproduct_images"
-    );
   });
 
   it("propagates a Replicate submission failure so Step Functions fails fast", async () => {
