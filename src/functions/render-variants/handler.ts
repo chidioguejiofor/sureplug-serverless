@@ -4,17 +4,13 @@ import {
   PutObjectCommand,
 } from "@aws-sdk/client-s3";
 import sharp from "sharp";
-import { composeOntoNeutralBackground } from "../../shared/compose-on-neutral-background";
 import {
   VARIANT_SPECS,
+  VariantSpec,
   ORIGINAL_MASTER_WEBP_QUALITY,
   planVariantSize,
 } from "../../shared/variant-specs";
-import {
-  AWS_REGION,
-  MEDIA_S3_BUCKET,
-  NEUTRAL_BACKGROUND_COLOR,
-} from "../../shared/settings";
+import { AWS_REGION, MEDIA_S3_BUCKET } from "../../shared/settings";
 
 const s3 = new S3Client({ region: AWS_REGION });
 
@@ -22,7 +18,6 @@ export type RenderVariantsInput = {
   fileId: string;
   keyPrefix: string;
   sourceKey: string;
-  composite: boolean;
 };
 
 export type RenderedVariant = {
@@ -66,75 +61,80 @@ async function putVariant(
   );
 }
 
+type MasterContext = {
+  master: Buffer;
+  width: number;
+  height: number;
+  folder: string;
+};
+
+async function renderOriginal(ctx: MasterContext): Promise<RenderedVariant> {
+  const body = await sharp(ctx.master)
+    .webp({ quality: ORIGINAL_MASTER_WEBP_QUALITY })
+    .toBuffer();
+  const storageKey = `${ctx.folder}/original.webp`;
+  await putVariant(storageKey, body, "image/webp");
+  return {
+    name: "ORIGINAL",
+    format: "WEBP",
+    storageKey,
+    width: ctx.width,
+    height: ctx.height,
+    sizeBytes: body.length,
+  };
+}
+
+async function renderSized(
+  ctx: MasterContext,
+  spec: VariantSpec,
+  format: "WEBP" | "JPEG"
+): Promise<RenderedVariant> {
+  const size = planVariantSize(ctx.width, ctx.height, spec.longEdge);
+  const resized = sharp(ctx.master).resize(spec.longEdge, spec.longEdge, {
+    fit: "inside",
+    withoutEnlargement: true,
+  });
+  const isWebp = format === "WEBP";
+  const body = await (isWebp
+    ? resized.webp({ quality: spec.webpQuality })
+    : resized.jpeg({ quality: spec.jpegQuality })
+  ).toBuffer();
+  const storageKey = `${ctx.folder}/${spec.name.toLowerCase()}.${
+    isWebp ? "webp" : "jpg"
+  }`;
+  await putVariant(storageKey, body, isWebp ? "image/webp" : "image/jpeg");
+  return {
+    name: spec.name,
+    format,
+    storageKey,
+    width: size.width,
+    height: size.height,
+    sizeBytes: body.length,
+  };
+}
+
 export async function handler(
   event: RenderVariantsInput
 ): Promise<RenderVariantsOutput> {
   const sourceBytes = await getObjectBytes(event.sourceKey);
 
-  const master = event.composite
-    ? await composeOntoNeutralBackground(sourceBytes, NEUTRAL_BACKGROUND_COLOR)
-    : await sharp(sourceBytes).rotate().png().toBuffer();
+  const master = await sharp(sourceBytes).rotate().png().toBuffer();
 
   const masterMeta = await sharp(master).metadata();
-  const masterWidth = masterMeta.width ?? 0;
-  const masterHeight = masterMeta.height ?? 0;
+  const ctx: MasterContext = {
+    master,
+    width: masterMeta.width ?? 0,
+    height: masterMeta.height ?? 0,
+    folder: `${event.keyPrefix}/${event.fileId}`,
+  };
 
-  const folder = `${event.keyPrefix}/${event.fileId}`;
-  const variants: RenderedVariant[] = [];
-
-  const original = await sharp(master)
-    .webp({ quality: ORIGINAL_MASTER_WEBP_QUALITY })
-    .toBuffer();
-  const originalKey = `${folder}/original.webp`;
-  await putVariant(originalKey, original, "image/webp");
-  variants.push({
-    name: "ORIGINAL",
-    format: "WEBP",
-    storageKey: originalKey,
-    width: masterWidth,
-    height: masterHeight,
-    sizeBytes: original.length,
-  });
-
-  for (const spec of VARIANT_SPECS) {
-    const size = planVariantSize(masterWidth, masterHeight, spec.longEdge);
-
-    const webp = await sharp(master)
-      .resize(spec.longEdge, spec.longEdge, {
-        fit: "inside",
-        withoutEnlargement: true,
-      })
-      .webp({ quality: spec.webpQuality })
-      .toBuffer();
-    const webpKey = `${folder}/${spec.name.toLowerCase()}.webp`;
-    await putVariant(webpKey, webp, "image/webp");
-    variants.push({
-      name: spec.name,
-      format: "WEBP",
-      storageKey: webpKey,
-      width: size.width,
-      height: size.height,
-      sizeBytes: webp.length,
-    });
-
-    const jpeg = await sharp(master)
-      .resize(spec.longEdge, spec.longEdge, {
-        fit: "inside",
-        withoutEnlargement: true,
-      })
-      .jpeg({ quality: spec.jpegQuality })
-      .toBuffer();
-    const jpegKey = `${folder}/${spec.name.toLowerCase()}.jpg`;
-    await putVariant(jpegKey, jpeg, "image/jpeg");
-    variants.push({
-      name: spec.name,
-      format: "JPEG",
-      storageKey: jpegKey,
-      width: size.width,
-      height: size.height,
-      sizeBytes: jpeg.length,
-    });
-  }
+  const variants = await Promise.all([
+    renderOriginal(ctx),
+    ...VARIANT_SPECS.flatMap((spec) => [
+      renderSized(ctx, spec, "WEBP"),
+      renderSized(ctx, spec, "JPEG"),
+    ]),
+  ]);
 
   return { fileId: event.fileId, keyPrefix: event.keyPrefix, variants };
 }

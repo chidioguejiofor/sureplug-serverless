@@ -26,6 +26,10 @@ provider:
     CONTACT_SHADOW_HEIGHT_RATIO: ${env:CONTACT_SHADOW_HEIGHT_RATIO, '0.1'}
     CONTACT_SHADOW_BLUR_RATIO: ${env:CONTACT_SHADOW_BLUR_RATIO, '0.35'}
     CONTACT_SHADOW_OPACITY: ${env:CONTACT_SHADOW_OPACITY, '0.28'}
+    UPSCALE_MODEL_VERSION: ${env:UPSCALE_MODEL_VERSION}
+    UPSCALE_CALLBACK_BASE_URL: ${env:UPSCALE_CALLBACK_BASE_URL}
+    UPSCALE_MIN_LONG_EDGE: ${env:UPSCALE_MIN_LONG_EDGE, '1400'}
+    UPSCALE_FACTOR: ${env:UPSCALE_FACTOR, '2'}
     APP_INTERNAL_WEBHOOK_URL: ${env:APP_INTERNAL_WEBHOOK_URL}
     MEDIA_PIPELINE_WEBHOOK_SECRET: ${env:MEDIA_PIPELINE_WEBHOOK_SECRET}
   iam:
@@ -83,10 +87,25 @@ functions:
   cropSubject:
     handler: src/functions/crop-subject/handler.handler
     timeout: 30
+  composeMaster:
+    handler: src/functions/compose-master/handler.handler
+    timeout: 30
+    memorySize: 1024
+  upscale:
+    handler: src/functions/upscale/handler.handler
+    timeout: 15
+  upscaleCallback:
+    handler: src/functions/upscale-callback/handler.handler
+    timeout: 30
+    memorySize: 1024
+    events:
+      - httpApi:
+          path: /webhooks/upscale
+          method: post
   renderVariants:
     handler: src/functions/render-variants/handler.handler
     timeout: 60
-    memorySize: 1024
+    memorySize: 2048
   reportResult:
     handler: src/functions/report-result/handler.handler
     timeout: 15
@@ -96,7 +115,7 @@ stepFunctions:
     mediaPipeline:
       name: ${self:service}-${sls:stage}-media-pipeline
       definition:
-        Comment: SurePlug product-image processing pipeline - classification, blur check, background-removal, cropping, variant rendering, and reporting the outcome back to sureplug-backend are implemented; conditional upscale is not
+        Comment: SurePlug product-image processing pipeline - classification, blur check, background-removal, cropping, compositing, conditional upscale, variant rendering, and reporting the outcome back to sureplug-backend
         StartAt: ClassifyImage
         States:
           ClassifyImage:
@@ -118,9 +137,9 @@ stepFunctions:
             Choices:
               - Variable: "$.needsBackgroundRemoval"
                 BooleanEquals: false
-                Next: RenderVariantsPassthrough
+                Next: RenderVariantsFromRaw
             Default: BlurCheck
-          RenderVariantsPassthrough:
+          RenderVariantsFromRaw:
             Type: Task
             Resource:
               Fn::GetAtt: [renderVariants, Arn]
@@ -128,7 +147,6 @@ stepFunctions:
               fileId.$: "$.fileId"
               keyPrefix.$: "$.keyPrefix"
               sourceKey.$: "$.rawKey"
-              composite: false
             Next: ReportReady
           BlurCheck:
             Type: Task
@@ -181,16 +199,44 @@ stepFunctions:
               - Variable: "$.needsReupload"
                 BooleanEquals: true
                 Next: ReportNeedsReupload
-            Default: RenderVariantsComposite
-          RenderVariantsComposite:
+            Default: ComposeMaster
+          ComposeMaster:
+            Type: Task
+            Resource:
+              Fn::GetAtt: [composeMaster, Arn]
+            Parameters:
+              fileId.$: "$.fileId"
+              keyPrefix.$: "$.keyPrefix"
+              cutoutKey.$: "$.cutoutKey"
+            Next: CheckUpscale
+          CheckUpscale:
+            Type: Choice
+            Choices:
+              - Variable: "$.needsUpscale"
+                BooleanEquals: true
+                Next: Upscale
+            Default: RenderVariantsFromMaster
+          Upscale:
+            Type: Task
+            Resource: arn:aws:states:::lambda:invoke.waitForTaskToken
+            Parameters:
+              FunctionName:
+                Fn::GetAtt: [upscale, Arn]
+              Payload:
+                TaskToken.$: "$$.Task.Token"
+                fileId.$: "$.fileId"
+                keyPrefix.$: "$.keyPrefix"
+                masterKey.$: "$.masterKey"
+            TimeoutSeconds: 900
+            Next: RenderVariantsFromMaster
+          RenderVariantsFromMaster:
             Type: Task
             Resource:
               Fn::GetAtt: [renderVariants, Arn]
             Parameters:
               fileId.$: "$.fileId"
               keyPrefix.$: "$.keyPrefix"
-              sourceKey.$: "$.cutoutKey"
-              composite: true
+              sourceKey.$: "$.masterKey"
             Next: ReportReady
           ReportNeedsReupload:
             Type: Task

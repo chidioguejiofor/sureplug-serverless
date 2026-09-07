@@ -44,6 +44,15 @@ export const CONTACT_SHADOW_OPACITY = Number(
   process.env.CONTACT_SHADOW_OPACITY || 0.28
 );
 
+export const UPSCALE_MODEL_VERSION = process.env
+  .UPSCALE_MODEL_VERSION as string;
+export const UPSCALE_CALLBACK_BASE_URL = process.env
+  .UPSCALE_CALLBACK_BASE_URL as string;
+export const UPSCALE_MIN_LONG_EDGE = Number(
+  process.env.UPSCALE_MIN_LONG_EDGE || 1400
+);
+export const UPSCALE_FACTOR = Number(process.env.UPSCALE_FACTOR || 2);
+
 export const APP_INTERNAL_WEBHOOK_URL = process.env
   .APP_INTERNAL_WEBHOOK_URL as string;
 export const MEDIA_PIPELINE_WEBHOOK_SECRET = process.env

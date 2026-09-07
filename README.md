@@ -1,9 +1,9 @@
 # sureplug-serverless
 
 The product-image processing pipeline for SurePlug: background removal,
-compositing onto a neutral background, cropping, conditional upscaling (not
-yet built), rendering the size variants the storefront actually serves, and
-reporting the outcome back to `sureplug-backend`. Runs as an AWS
+compositing onto a neutral background, cropping, conditional upscaling,
+rendering the size variants the storefront actually serves, and reporting the
+outcome back to `sureplug-backend`. Runs as an AWS
 Step Functions state machine backed by Lambda, deployed with the
 [Serverless Framework](https://www.serverless.com/).
 
@@ -53,23 +53,39 @@ What this pipeline actually does:
    **transparent** cropped cutout, written to `cutout.png` under the file's
    own `{keyPrefix}/{fileId}/` folder - see "Why the master stays transparent"
    below for why this stage doesn't composite onto a background itself.
-5. **Upscale** *(conditional, not yet implemented)* - only when the cropped
-   image's long edge is below a quality threshold.
-6. **RenderVariants** - produces `original.webp` (the served master, WebP
-   q92) plus `thumb`/`card`/`zoom` in both WebP and JPEG, for *both* paths.
-   The CLEAN path composites `cutout.png` onto the neutral background +
-   contact shadow (`composeOntoNeutralBackground`) to get the opaque master;
-   the KEEP path just auto-orients the raw upload (no compositing - the
-   image's own background *is* the content). Both then encode the master to
-   WebP and resize into the fixed size set. The served master is WebP, not
-   PNG, on purpose: the KEEP path's raw upload is often a photographic JPEG
-   (marketing graphic, lifestyle shot) and re-encoding that to PNG bloats it
-   5-10x for no gain - the lossless re-derivation sources are `cutout.png`
-   (CLEAN) and the retained `raw.*` (both), never `original.*`. Every
-   serving-facing asset is opaque; `cutout.png` is the only thing that stays
-   transparent. Returns a manifest of every variant
-   (name/format/key/dimensions/bytes) for `ReportResult`.
-7. **ReportResult** - calls `sureplug-backend`'s
+5. **ComposeMaster** *(CLEAN path only)* - composites `cutout.png` onto the
+   neutral background + synthesized contact shadow
+   (`composeOntoNeutralBackground`) and writes the opaque `master.png`. Split
+   out of `RenderVariants` specifically so `Upscale` has an opaque RGB image
+   to work on (see next). Reports the master's dimensions so the state
+   machine can decide whether to upscale.
+6. **Upscale** *(conditional, CLEAN path only)* - when the composited
+   master's long edge is below `UPSCALE_MIN_LONG_EDGE`, run an upscaling
+   model (Real-ESRGAN-class) on Replicate, same task-token/webhook pattern as
+   `RemoveBackground`. It runs *after* compositing, not on `cutout.png`,
+   because super-resolution models operate on RGB and mangle an alpha channel
+   - and on the CLEAN path the cutout's alpha *is* the segmentation mask.
+   Once the subject is composited onto the opaque neutral background there's
+   no alpha to lose. `upscaleCallback` overwrites `master.png` in place with
+   the upscaled result (flattened back onto the neutral colour in case the
+   model emits alpha). Upscaling is best-effort: a failed prediction or a
+   bad download is logged and the pipeline proceeds with the un-upscaled
+   master (`SendTaskSuccess` either way) - a slightly-softer zoom view is
+   invisible next to a stalled execution. The KEEP path is never upscaled:
+   deliberately composed graphics/infographics are served at native
+   resolution (running super-resolution over text is risky) and the miss is
+   invisible anyway.
+7. **RenderVariants** - takes one opaque source (`master.png` for CLEAN,
+   `raw.*` for KEEP), auto-orients it, and produces `original.webp` (the
+   served master, WebP q92) plus `thumb`/`card`/`zoom` in both WebP and
+   JPEG. The served master is WebP, not PNG, on purpose: the KEEP path's raw
+   upload is often a photographic JPEG (marketing graphic, lifestyle shot)
+   and re-encoding that to PNG bloats it 5-10x for no gain - the lossless
+   re-derivation sources are `cutout.png` (CLEAN) and the retained `raw.*`
+   (both), never `original.*`. Every serving-facing asset is opaque;
+   `cutout.png` is the only thing that stays transparent. Returns a manifest
+   of every variant (name/format/key/dimensions/bytes) for `ReportResult`.
+8. **ReportResult** - calls `sureplug-backend`'s
    `POST /media/internal/pipeline-result` with the outcome (`READY` + the
    rendered variant manifest, or `NEEDS_REUPLOAD` + a reason -
    `too_blurry` / `no_product_detected` / `background_removal_failed`),
@@ -177,12 +193,14 @@ swap doesn't get that for free). Two things fix this, both in
 Given that, **`CropSubject` deliberately does not composite onto a
 background at all** - it writes the transparent, cropped cutout to
 `cutout.png`. Compositing (background + shadow, via
-`composeOntoNeutralBackground`) happens in `RenderVariants` instead, which
-produces the opaque served `original.webp` and the sizes from it. Keeping
-`cutout.png` around means a future backdrop change (a confirmed `Paper`
-value, theme-aware backgrounds, a different shadow style) only needs
-`RenderVariants` re-run against the cutout already in S3 - never the
-expensive background-removal stage again.
+`composeOntoNeutralBackground`) happens in the separate `ComposeMaster`
+stage, which produces the opaque `master.png` that `Upscale` and
+`RenderVariants` then work from. Keeping `cutout.png` around means a future
+backdrop change (a confirmed `Paper` value, theme-aware backgrounds, a
+different shadow style) only needs `ComposeMaster` + `RenderVariants` re-run
+against the cutout already in S3 - never the expensive background-removal
+stage again. It also gives `Upscale` an opaque RGB master to run on rather
+than an RGBA cutout whose alpha channel is really a segmentation mask.
 
 ## Setup
 
@@ -202,15 +220,23 @@ cross-install step - `serverless.yml`'s `esbuild.packagerOptions.scripts` runs
 right binary ends up in the deployment artifact regardless of what you're
 developing on.
 
+`renderVariants` encodes and uploads its 7 outputs (`original` + `thumb`/
+`card`/`zoom` × WebP/JPEG) concurrently via `Promise.all` - sharp does its
+work on a libvips threadpool and the S3 puts are I/O, so serialising them
+just wastes wall-clock. It runs at `memorySize: 2048` for the headroom that
+many simultaneous decode/resize buffers need (and the extra vCPU share that
+comes with it).
+
 ## Commands
 
 - `npm run typecheck` - `tsc --noEmit`.
 - `npm test` / `npm run tdd` - unit tests (Vitest). Pure logic (blur score,
   mask bounds, crop/variant planning, classification parsing) is tested
   directly; most handlers are thin wrappers left to typecheck + bundle checks,
-  except `render-variants` which runs a real `sharp` pipeline end-to-end
-  (S3 mocked, actual image bytes) since it's the stage that produces every
-  served asset.
+  except `compose-master` and `render-variants`, which run a real `sharp`
+  pipeline end-to-end (S3 mocked, actual image bytes) since they produce the
+  master and every served asset, and `upscale-callback`, which is tested for
+  its best-effort behaviour (proceed with the un-upscaled master on failure).
 - `npm run package` - `serverless package`, builds the deployment artifact
   without deploying anything.
 - `npm run deploy` / `npm run deploy:dev` - deploys the stack. Needs AWS
@@ -224,11 +250,12 @@ developing on.
 Defined in `serverless.yml` via the `serverless-step-functions` plugin
 (`stepFunctions.stateMachines.mediaPipeline`), not a separate ASL file - keeps
 the state machine and the Lambda definitions it references in one place.
-Currently `ClassifyImage` -> a Choice going straight to
-`RenderVariantsPassthrough` (classifier said KEEP) or on to `BlurCheck` ->
-`RemoveBackground` -> `CropSubject` -> a Choice going to `ReportNeedsReupload`
-or `RenderVariantsComposite`. A too-blurry image routes to `ReportTooBlurry`.
-Both render paths converge on `ReportReady`. All three `Report*` states are
-the `reportResult` Lambda (retry/backoff on `States.ALL`) and then flow into
-the single `PipelineComplete` success state. The only stage still missing is
-the conditional `Upscale`.
+`ClassifyImage` -> a Choice going straight to `RenderVariantsFromRaw`
+(classifier said KEEP) or on to `BlurCheck` -> `RemoveBackground` ->
+`CropSubject` -> a Choice going to `ReportNeedsReupload` or `ComposeMaster`.
+`ComposeMaster` -> a Choice (`$.needsUpscale`) going to `Upscale` (then
+`RenderVariantsFromMaster`) or straight to `RenderVariantsFromMaster`. A
+too-blurry image routes to `ReportTooBlurry`. Both render states converge on
+`ReportReady`. All three `Report*` states are the `reportResult` Lambda
+(retry/backoff on `States.ALL`) and then flow into the single
+`PipelineComplete` success state.

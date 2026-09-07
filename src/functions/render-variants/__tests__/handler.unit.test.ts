@@ -14,44 +14,47 @@ vi.mock("@aws-sdk/client-s3", async () => {
 
 import { handler } from "../handler";
 
-async function transparentCutout(): Promise<Buffer> {
+async function opaqueMaster(
+  width: number,
+  height: number
+): Promise<Buffer> {
   return sharp({
     create: {
-      width: 800,
-      height: 500,
-      channels: 4,
-      background: { r: 0, g: 0, b: 0, alpha: 0 },
+      width,
+      height,
+      channels: 3,
+      background: { r: 245, g: 245, b: 245 },
     },
   })
     .composite([
       {
         input: {
           create: {
-            width: 400,
-            height: 300,
-            channels: 4,
-            background: { r: 200, g: 30, b: 30, alpha: 1 },
+            width: Math.round(width / 2),
+            height: Math.round(height / 2),
+            channels: 3,
+            background: { r: 200, g: 30, b: 30 },
           },
         },
-        left: 200,
-        top: 100,
+        left: Math.round(width / 4),
+        top: Math.round(height / 4),
       },
     ])
     .png()
     .toBuffer();
 }
 
-describe("render-variants handler (composite path)", () => {
+describe("render-variants handler", () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
 
   it("produces an ORIGINAL plus thumb/card/zoom in webp and jpeg, and uploads each", async () => {
-    const cutout = await transparentCutout();
+    const master = await opaqueMaster(800, 500);
     sendMock.mockImplementation((command) => {
       if (command.constructor.name === "GetObjectCommand") {
         return Promise.resolve({
-          Body: { transformToByteArray: () => Promise.resolve(cutout) },
+          Body: { transformToByteArray: () => Promise.resolve(master) },
         });
       }
       return Promise.resolve({});
@@ -60,8 +63,7 @@ describe("render-variants handler (composite path)", () => {
     const result = await handler({
       fileId: "file-1",
       keyPrefix: "merchants/merchant-1/product_images",
-      sourceKey: "merchants/merchant-1/product_images/file-1/cutout.png",
-      composite: true,
+      sourceKey: "merchants/merchant-1/product_images/file-1/master.png",
     });
 
     const names = result.variants.map((v) => `${v.name}:${v.format}`);
@@ -81,10 +83,14 @@ describe("render-variants handler (composite path)", () => {
     );
     expect(original.width).toEqual(800);
     expect(original.height).toEqual(500);
-    const originalBody = sendMock.mock.calls
-      .filter(([c]) => c.constructor.name === "PutObjectCommand")
-      .map(([c]) => c.input.Body as Buffer)[0];
-    expect((await sharp(originalBody).metadata()).format).toEqual("webp");
+    const putByKey = new Map<string, Buffer>(
+      sendMock.mock.calls
+        .filter(([c]) => c.constructor.name === "PutObjectCommand")
+        .map(([c]) => [c.input.Key as string, c.input.Body as Buffer])
+    );
+    expect(
+      (await sharp(putByKey.get(original.storageKey)!).metadata()).format
+    ).toEqual("webp");
 
     // 800x500 source, thumb long edge 300 -> 300x188 (rounded)
     const thumbWebp = result.variants.find(
@@ -94,32 +100,26 @@ describe("render-variants handler (composite path)", () => {
     expect(thumbWebp.height).toEqual(188);
     expect(thumbWebp.sizeBytes).toBeGreaterThan(0);
 
-    // every variant produced a decodable image of the expected format
-    const putBodies = sendMock.mock.calls
-      .filter(([c]) => c.constructor.name === "PutObjectCommand")
-      .map(([c]) => c.input.Body as Buffer);
-    expect(putBodies).toHaveLength(7);
-    const zoomJpeg = putBodies[6];
-    const meta = await sharp(zoomJpeg).metadata();
+    // every variant was uploaded, each key exactly once
+    expect(putByKey.size).toEqual(7);
+    for (const variant of result.variants) {
+      expect(putByKey.has(variant.storageKey)).toBe(true);
+    }
+
+    const zoomJpeg = result.variants.find(
+      (v) => v.name === "ZOOM" && v.format === "JPEG"
+    )!;
+    const meta = await sharp(putByKey.get(zoomJpeg.storageKey)!).metadata();
     expect(meta.format).toEqual("jpeg");
     expect(meta.hasAlpha).toBe(false);
   });
 
   it("never enlarges: a small source keeps its dimensions for every size class", async () => {
-    const smallCutout = await sharp({
-      create: {
-        width: 200,
-        height: 150,
-        channels: 4,
-        background: { r: 10, g: 10, b: 10, alpha: 1 },
-      },
-    })
-      .png()
-      .toBuffer();
+    const smallMaster = await opaqueMaster(200, 150);
     sendMock.mockImplementation((command) => {
       if (command.constructor.name === "GetObjectCommand") {
         return Promise.resolve({
-          Body: { transformToByteArray: () => Promise.resolve(smallCutout) },
+          Body: { transformToByteArray: () => Promise.resolve(smallMaster) },
         });
       }
       return Promise.resolve({});
@@ -129,7 +129,6 @@ describe("render-variants handler (composite path)", () => {
       fileId: "file-2",
       keyPrefix: "merchants/merchant-1/product_images",
       sourceKey: "merchants/merchant-1/product_images/file-2/raw.jpg",
-      composite: false,
     });
 
     for (const variant of result.variants) {
