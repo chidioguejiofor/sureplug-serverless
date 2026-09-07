@@ -49,25 +49,25 @@ What this pipeline actually does:
    opaque area -> `no_product_detected`, too much -> `background_removal_failed`,
    either routes to `NeedsReupload`) and drives the crop (bounding box + a
    configurable padding ratio, clamped to the image edges). The result stays a
-   **transparent** cropped cutout, written to `original.png` under the file's
+   **transparent** cropped cutout, written to `cutout.png` under the file's
    own `{keyPrefix}/{fileId}/` folder - see "Why the master stays transparent"
    below for why this stage doesn't composite onto a background itself.
 5. **Upscale** *(conditional, not yet implemented)* - only when the cropped
    image's long edge is below a quality threshold.
-6. **RenderVariants** *(not yet implemented)* - the fixed size set
-   (`zoom`/`card`/`thumb`, WebP + JPEG) the storefront actually serves, for
-   *both* paths (an image the classifier said to keep as-is still needs
-   resizing for grids/thumbnails - it just skips straight here instead of
-   going through `RemoveBackground`/`CropSubject` first). This is where
-   `original.png`'s transparency actually gets flattened for the
-   background-removed path - each variant is rendered via
-   `composeOntoNeutralBackground` (already built, not yet wired to a stage)
-   before being resized, so every serving-facing asset is opaque; only the
-   master stays transparent.
+6. **RenderVariants** - produces `original.png` (the served master) plus
+   `thumb`/`card`/`zoom` in both WebP and JPEG, for *both* paths. The CLEAN
+   path composites `cutout.png` onto the neutral background + contact shadow
+   (`composeOntoNeutralBackground`) to get an opaque `original.png`; the KEEP
+   path just auto-orients and re-encodes the raw upload (no compositing - the
+   image's own background *is* the content). Both then resize into the fixed
+   size set. Every serving-facing asset is opaque; `cutout.png` is the only
+   thing that stays transparent. Returns a manifest of every variant
+   (name/format/key/dimensions/bytes) for `ReportResult`.
 7. **ReportResult** *(not yet implemented)* - calls
    `sureplug-backend`'s `POST /media/internal/pipeline-result` with the
    outcome (`READY` + the rendered variants, or `NEEDS_REUPLOAD` + a reason),
-   authenticated with a shared secret header.
+   authenticated with a shared secret header. This is what both terminal
+   `PipelineComplete` / `NeedsReupload` placeholder states become.
 
 ## RemoveBackground correlation & webhook verification
 
@@ -162,14 +162,14 @@ swap doesn't get that for free). Two things fix this, both in
   env var change once the real value is confirmed.
 
 Given that, **`CropSubject` deliberately does not composite onto a
-background at all** - `original.png`, the master everything else derives
-from, stays the transparent, cropped cutout. Compositing (background +
-shadow) happens once per rendered variant, in the not-yet-built
-`RenderVariants` stage, via `composeOntoNeutralBackground`. Keeping the
-master transparent means a future backdrop change (a confirmed `Paper` value,
-theme-aware backgrounds, a different shadow style) never requires re-running
-the expensive background-removal stage - only re-rendering variants from the
-master already in S3.
+background at all** - it writes the transparent, cropped cutout to
+`cutout.png`. Compositing (background + shadow, via
+`composeOntoNeutralBackground`) happens in `RenderVariants` instead, which
+produces the opaque served `original.png` and the sizes from it. Keeping
+`cutout.png` around means a future backdrop change (a confirmed `Paper`
+value, theme-aware backgrounds, a different shadow style) only needs
+`RenderVariants` re-run against the cutout already in S3 - never the
+expensive background-removal stage again.
 
 ## Setup
 
@@ -192,9 +192,12 @@ developing on.
 ## Commands
 
 - `npm run typecheck` - `tsc --noEmit`.
-- `npm test` / `npm run tdd` - unit tests (Vitest). Pure logic (e.g. the blur
-  score calculation) is unit-tested directly, with no AWS involved - handlers
-  are thin wrappers around it.
+- `npm test` / `npm run tdd` - unit tests (Vitest). Pure logic (blur score,
+  mask bounds, crop/variant planning, classification parsing) is tested
+  directly; most handlers are thin wrappers left to typecheck + bundle checks,
+  except `render-variants` which runs a real `sharp` pipeline end-to-end
+  (S3 mocked, actual image bytes) since it's the stage that produces every
+  served asset.
 - `npm run package` - `serverless package`, builds the deployment artifact
   without deploying anything.
 - `npm run deploy` / `npm run deploy:dev` - deploys the stack. Needs AWS
@@ -208,10 +211,9 @@ developing on.
 Defined in `serverless.yml` via the `serverless-step-functions` plugin
 (`stepFunctions.stateMachines.mediaPipeline`), not a separate ASL file - keeps
 the state machine and the Lambda definitions it references in one place.
-Currently `ClassifyImage` -> a Choice routing straight to a stand-in
-`KeepAsIs` success state (classifier said KEEP) or on to `BlurCheck` ->
-`RemoveBackground` -> `CropSubject` -> a Choice routing to `NeedsReupload` or
-a stand-in `PipelineNotYetImplemented` success state - each remaining stage
-above gets added as its own Lambda + state as it's implemented, and
-`RenderVariants` will eventually become what both `KeepAsIs` and
-`PipelineNotYetImplemented` actually lead to.
+Currently `ClassifyImage` -> a Choice going straight to
+`RenderVariantsPassthrough` (classifier said KEEP) or on to `BlurCheck` ->
+`RemoveBackground` -> `CropSubject` -> a Choice going to `NeedsReupload` or
+`RenderVariantsComposite`. Both render paths end at a stand-in
+`PipelineComplete` success state; `NeedsReupload` is also a stand-in.
+`ReportResult` is what all three terminal states become once it's built.

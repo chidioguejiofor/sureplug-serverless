@@ -21,6 +21,11 @@ provider:
     MIN_SUBJECT_COVERAGE_RATIO: ${env:MIN_SUBJECT_COVERAGE_RATIO, '0.02'}
     MAX_SUBJECT_COVERAGE_RATIO: ${env:MAX_SUBJECT_COVERAGE_RATIO, '0.98'}
     CROP_PADDING_RATIO: ${env:CROP_PADDING_RATIO, '0.05'}
+    NEUTRAL_BACKGROUND_COLOR: ${env:NEUTRAL_BACKGROUND_COLOR, '#FAFAFA'}
+    CONTACT_SHADOW_WIDTH_RATIO: ${env:CONTACT_SHADOW_WIDTH_RATIO, '0.7'}
+    CONTACT_SHADOW_HEIGHT_RATIO: ${env:CONTACT_SHADOW_HEIGHT_RATIO, '0.1'}
+    CONTACT_SHADOW_BLUR_RATIO: ${env:CONTACT_SHADOW_BLUR_RATIO, '0.35'}
+    CONTACT_SHADOW_OPACITY: ${env:CONTACT_SHADOW_OPACITY, '0.28'}
   iam:
     role:
       statements:
@@ -76,13 +81,17 @@ functions:
   cropSubject:
     handler: src/functions/crop-subject/handler.handler
     timeout: 30
+  renderVariants:
+    handler: src/functions/render-variants/handler.handler
+    timeout: 60
+    memorySize: 1024
 
 stepFunctions:
   stateMachines:
     mediaPipeline:
       name: ${self:service}-${sls:stage}-media-pipeline
       definition:
-        Comment: SurePlug product-image processing pipeline - classification, blur check, background-removal, and cropping are implemented; conditional upscale and variant rendering (where neutral-background compositing + the contact shadow actually happen, for both the CLEAN and KEEP paths) are not
+        Comment: SurePlug product-image processing pipeline - classification, blur check, background-removal, cropping, and variant rendering are implemented; conditional upscale and reporting the outcome back to sureplug-backend are not
         StartAt: ClassifyImage
         States:
           ClassifyImage:
@@ -104,10 +113,18 @@ stepFunctions:
             Choices:
               - Variable: "$.needsBackgroundRemoval"
                 BooleanEquals: false
-                Next: KeepAsIs
+                Next: RenderVariantsPassthrough
             Default: BlurCheck
-          KeepAsIs:
-            Type: Succeed
+          RenderVariantsPassthrough:
+            Type: Task
+            Resource:
+              Fn::GetAtt: [renderVariants, Arn]
+            Parameters:
+              fileId.$: "$.fileId"
+              keyPrefix.$: "$.keyPrefix"
+              sourceKey.$: "$.rawKey"
+              composite: false
+            Next: PipelineComplete
           BlurCheck:
             Type: Task
             Resource:
@@ -147,8 +164,18 @@ stepFunctions:
               - Variable: "$.needsReupload"
                 BooleanEquals: true
                 Next: NeedsReupload
-            Default: PipelineNotYetImplemented
+            Default: RenderVariantsComposite
+          RenderVariantsComposite:
+            Type: Task
+            Resource:
+              Fn::GetAtt: [renderVariants, Arn]
+            Parameters:
+              fileId.$: "$.fileId"
+              keyPrefix.$: "$.keyPrefix"
+              sourceKey.$: "$.cutoutKey"
+              composite: true
+            Next: PipelineComplete
           NeedsReupload:
             Type: Succeed
-          PipelineNotYetImplemented:
+          PipelineComplete:
             Type: Succeed

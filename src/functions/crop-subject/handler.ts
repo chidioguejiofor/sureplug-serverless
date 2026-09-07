@@ -23,7 +23,7 @@ export type CropSubjectOutput =
       fileId: string;
       keyPrefix: string;
       needsReupload: false;
-      originalKey: string;
+      cutoutKey: string;
       width: number;
       height: number;
     }
@@ -77,11 +77,11 @@ export async function handler(
     .png()
     .toBuffer();
 
-  const originalKey = `${event.keyPrefix}/${event.fileId}/original.png`;
+  const cutoutKey = `${event.keyPrefix}/${event.fileId}/cutout.png`;
   await s3.send(
     new PutObjectCommand({
       Bucket: MEDIA_S3_BUCKET,
-      Key: originalKey,
+      Key: cutoutKey,
       Body: cropped,
       ContentType: "image/png",
     })
@@ -91,7 +91,7 @@ export async function handler(
     fileId: event.fileId,
     keyPrefix: event.keyPrefix,
     needsReupload: false,
-    originalKey,
+    cutoutKey,
     width: plan.crop.width,
     height: plan.crop.height,
   };
