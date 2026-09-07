@@ -1,0 +1,270 @@
+service: sureplug-media-pipeline
+
+frameworkVersion: '4'
+
+provider:
+  name: aws
+  runtime: nodejs22.x
+  architecture: arm64
+  region: ${env:AWS_REGION, 'eu-west-2'}
+  stage: ${opt:stage, 'dev'}
+  environment:
+    MEDIA_S3_BUCKET: ${env:MEDIA_S3_BUCKET}
+    BLUR_SCORE_THRESHOLD: ${env:BLUR_SCORE_THRESHOLD, '100'}
+    REPLICATE_API_TOKEN: ${env:REPLICATE_API_TOKEN}
+    BACKGROUND_REMOVAL_MODEL_VERSION: ${env:BACKGROUND_REMOVAL_MODEL_VERSION}
+    REMOVE_BACKGROUND_CALLBACK_BASE_URL: ${env:REMOVE_BACKGROUND_CALLBACK_BASE_URL}
+    SOURCE_IMAGE_URL_TTL_SECONDS: ${env:SOURCE_IMAGE_URL_TTL_SECONDS, '900'}
+    REPLICATE_WEBHOOK_SECRET: ${env:REPLICATE_WEBHOOK_SECRET}
+    IMAGE_CLASSIFIER_MODEL_VERSION: ${env:IMAGE_CLASSIFIER_MODEL_VERSION}
+    CLASSIFY_IMAGE_CALLBACK_BASE_URL: ${env:CLASSIFY_IMAGE_CALLBACK_BASE_URL}
+    MIN_SUBJECT_COVERAGE_RATIO: ${env:MIN_SUBJECT_COVERAGE_RATIO, '0.02'}
+    MAX_SUBJECT_COVERAGE_RATIO: ${env:MAX_SUBJECT_COVERAGE_RATIO, '0.98'}
+    CROP_PADDING_RATIO: ${env:CROP_PADDING_RATIO, '0.05'}
+    NEUTRAL_BACKGROUND_COLOR: ${env:NEUTRAL_BACKGROUND_COLOR, '#FAFAFA'}
+    CONTACT_SHADOW_WIDTH_RATIO: ${env:CONTACT_SHADOW_WIDTH_RATIO, '0.7'}
+    CONTACT_SHADOW_HEIGHT_RATIO: ${env:CONTACT_SHADOW_HEIGHT_RATIO, '0.1'}
+    CONTACT_SHADOW_BLUR_RATIO: ${env:CONTACT_SHADOW_BLUR_RATIO, '0.35'}
+    CONTACT_SHADOW_OPACITY: ${env:CONTACT_SHADOW_OPACITY, '0.28'}
+    UPSCALE_MODEL_VERSION: ${env:UPSCALE_MODEL_VERSION}
+    UPSCALE_CALLBACK_BASE_URL: ${env:UPSCALE_CALLBACK_BASE_URL}
+    UPSCALE_MIN_LONG_EDGE: ${env:UPSCALE_MIN_LONG_EDGE, '1400'}
+    UPSCALE_FACTOR: ${env:UPSCALE_FACTOR, '2'}
+    APP_INTERNAL_WEBHOOK_URL: ${env:APP_INTERNAL_WEBHOOK_URL}
+    MEDIA_PIPELINE_WEBHOOK_SECRET: ${env:MEDIA_PIPELINE_WEBHOOK_SECRET}
+  iam:
+    role:
+      statements:
+        - Effect: Allow
+          Action:
+            - s3:GetObject
+            - s3:PutObject
+          Resource: 'arn:aws:s3:::${env:MEDIA_S3_BUCKET}/*'
+        - Effect: Allow
+          Action:
+            - states:SendTaskSuccess
+            - states:SendTaskFailure
+          Resource: '*'
+
+plugins:
+  - serverless-esbuild
+  - serverless-step-functions
+
+custom:
+  esbuild:
+    bundle: true
+    minify: false
+    sourcemap: true
+    exclude:
+      - sharp
+    target: node22
+    platform: node
+    packagerOptions:
+      scripts:
+        - npm rebuild sharp --platform=linux --arch=arm64
+
+functions:
+  classifyImage:
+    handler: src/functions/classify-image/handler.handler
+    timeout: 15
+  classifyImageCallback:
+    handler: src/functions/classify-image-callback/handler.handler
+    events:
+      - httpApi:
+          path: /webhooks/classify-image
+          method: post
+  blurCheck:
+    handler: src/functions/blur-check/handler.handler
+  removeBackground:
+    handler: src/functions/remove-background/handler.handler
+    timeout: 15
+  removeBackgroundCallback:
+    handler: src/functions/remove-background-callback/handler.handler
+    events:
+      - httpApi:
+          path: /webhooks/remove-background
+          method: post
+  cropSubject:
+    handler: src/functions/crop-subject/handler.handler
+    timeout: 30
+  composeMaster:
+    handler: src/functions/compose-master/handler.handler
+    timeout: 30
+    memorySize: 1024
+  upscale:
+    handler: src/functions/upscale/handler.handler
+    timeout: 15
+  upscaleCallback:
+    handler: src/functions/upscale-callback/handler.handler
+    timeout: 30
+    memorySize: 1024
+    events:
+      - httpApi:
+          path: /webhooks/upscale
+          method: post
+  renderVariants:
+    handler: src/functions/render-variants/handler.handler
+    timeout: 60
+    memorySize: 2048
+  reportResult:
+    handler: src/functions/report-result/handler.handler
+    timeout: 15
+
+stepFunctions:
+  stateMachines:
+    mediaPipeline:
+      name: ${self:service}-${sls:stage}-media-pipeline
+      definition:
+        Comment: SurePlug product-image processing pipeline - classification, blur check, background-removal, cropping, compositing, conditional upscale, variant rendering, and reporting the outcome back to sureplug-backend
+        StartAt: ClassifyImage
+        States:
+          ClassifyImage:
+            Type: Task
+            Resource: arn:aws:states:::lambda:invoke.waitForTaskToken
+            Parameters:
+              FunctionName:
+                Fn::GetAtt: [classifyImage, Arn]
+              Payload:
+                TaskToken.$: "$$.Task.Token"
+                fileId.$: "$.fileId"
+                bucket.$: "$.bucket"
+                keyPrefix.$: "$.keyPrefix"
+                rawKey.$: "$.rawKey"
+            TimeoutSeconds: 300
+            Next: CheckClassification
+          CheckClassification:
+            Type: Choice
+            Choices:
+              - Variable: "$.needsBackgroundRemoval"
+                BooleanEquals: false
+                Next: RenderVariantsFromRaw
+            Default: BlurCheck
+          RenderVariantsFromRaw:
+            Type: Task
+            Resource:
+              Fn::GetAtt: [renderVariants, Arn]
+            Parameters:
+              fileId.$: "$.fileId"
+              keyPrefix.$: "$.keyPrefix"
+              sourceKey.$: "$.rawKey"
+            Next: ReportReady
+          BlurCheck:
+            Type: Task
+            Resource:
+              Fn::GetAtt: [blurCheck, Arn]
+            Next: CheckBlurResult
+          CheckBlurResult:
+            Type: Choice
+            Choices:
+              - Variable: "$.isBlurry"
+                BooleanEquals: true
+                Next: ReportTooBlurry
+            Default: RemoveBackground
+          ReportTooBlurry:
+            Type: Task
+            Resource:
+              Fn::GetAtt: [reportResult, Arn]
+            Parameters:
+              fileId.$: "$.fileId"
+              outcome: NEEDS_REUPLOAD
+              reason: too_blurry
+            Retry:
+              - ErrorEquals: ["States.ALL"]
+                IntervalSeconds: 5
+                MaxAttempts: 4
+                BackoffRate: 2
+            Next: PipelineComplete
+          RemoveBackground:
+            Type: Task
+            Resource: arn:aws:states:::lambda:invoke.waitForTaskToken
+            Parameters:
+              FunctionName:
+                Fn::GetAtt: [removeBackground, Arn]
+              Payload:
+                TaskToken.$: "$$.Task.Token"
+                fileId.$: "$.fileId"
+                bucket.$: "$.bucket"
+                keyPrefix.$: "$.keyPrefix"
+                rawKey.$: "$.rawKey"
+            TimeoutSeconds: 900
+            Next: CropSubject
+          CropSubject:
+            Type: Task
+            Resource:
+              Fn::GetAtt: [cropSubject, Arn]
+            Next: CheckCropResult
+          CheckCropResult:
+            Type: Choice
+            Choices:
+              - Variable: "$.needsReupload"
+                BooleanEquals: true
+                Next: ReportNeedsReupload
+            Default: ComposeMaster
+          ComposeMaster:
+            Type: Task
+            Resource:
+              Fn::GetAtt: [composeMaster, Arn]
+            Parameters:
+              fileId.$: "$.fileId"
+              keyPrefix.$: "$.keyPrefix"
+              cutoutKey.$: "$.cutoutKey"
+            Next: CheckUpscale
+          CheckUpscale:
+            Type: Choice
+            Choices:
+              - Variable: "$.needsUpscale"
+                BooleanEquals: true
+                Next: Upscale
+            Default: RenderVariantsFromMaster
+          Upscale:
+            Type: Task
+            Resource: arn:aws:states:::lambda:invoke.waitForTaskToken
+            Parameters:
+              FunctionName:
+                Fn::GetAtt: [upscale, Arn]
+              Payload:
+                TaskToken.$: "$$.Task.Token"
+                fileId.$: "$.fileId"
+                keyPrefix.$: "$.keyPrefix"
+                masterKey.$: "$.masterKey"
+            TimeoutSeconds: 900
+            Next: RenderVariantsFromMaster
+          RenderVariantsFromMaster:
+            Type: Task
+            Resource:
+              Fn::GetAtt: [renderVariants, Arn]
+            Parameters:
+              fileId.$: "$.fileId"
+              keyPrefix.$: "$.keyPrefix"
+              sourceKey.$: "$.masterKey"
+            Next: ReportReady
+          ReportNeedsReupload:
+            Type: Task
+            Resource:
+              Fn::GetAtt: [reportResult, Arn]
+            Parameters:
+              fileId.$: "$.fileId"
+              outcome: NEEDS_REUPLOAD
+              reason.$: "$.reviewReason"
+            Retry:
+              - ErrorEquals: ["States.ALL"]
+                IntervalSeconds: 5
+                MaxAttempts: 4
+                BackoffRate: 2
+            Next: PipelineComplete
+          ReportReady:
+            Type: Task
+            Resource:
+              Fn::GetAtt: [reportResult, Arn]
+            Parameters:
+              fileId.$: "$.fileId"
+              outcome: READY
+              variants.$: "$.variants"
+            Retry:
+              - ErrorEquals: ["States.ALL"]
+                IntervalSeconds: 5
+                MaxAttempts: 4
+                BackoffRate: 2
+            Next: PipelineComplete
+          PipelineComplete:
+            Type: Succeed
