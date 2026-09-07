@@ -66,7 +66,7 @@ describe("render-variants handler (composite path)", () => {
 
     const names = result.variants.map((v) => `${v.name}:${v.format}`);
     expect(names).toEqual([
-      "ORIGINAL:PNG",
+      "ORIGINAL:WEBP",
       "THUMB:WEBP",
       "THUMB:JPEG",
       "CARD:WEBP",
@@ -77,10 +77,14 @@ describe("render-variants handler (composite path)", () => {
 
     const original = result.variants.find((v) => v.name === "ORIGINAL")!;
     expect(original.storageKey).toEqual(
-      "merchants/merchant-1/product_images/file-1/original.png"
+      "merchants/merchant-1/product_images/file-1/original.webp"
     );
     expect(original.width).toEqual(800);
     expect(original.height).toEqual(500);
+    const originalBody = sendMock.mock.calls
+      .filter(([c]) => c.constructor.name === "PutObjectCommand")
+      .map(([c]) => c.input.Body as Buffer)[0];
+    expect((await sharp(originalBody).metadata()).format).toEqual("webp");
 
     // 800x500 source, thumb long edge 300 -> 300x188 (rounded)
     const thumbWebp = result.variants.find(

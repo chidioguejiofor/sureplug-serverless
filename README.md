@@ -1,8 +1,9 @@
 # sureplug-serverless
 
 The product-image processing pipeline for SurePlug: background removal,
-compositing onto a neutral background, cropping, conditional upscaling, and
-rendering the size variants the storefront actually serves. Runs as an AWS
+compositing onto a neutral background, cropping, conditional upscaling (not
+yet built), rendering the size variants the storefront actually serves, and
+reporting the outcome back to `sureplug-backend`. Runs as an AWS
 Step Functions state machine backed by Lambda, deployed with the
 [Serverless Framework](https://www.serverless.com/).
 
@@ -54,20 +55,32 @@ What this pipeline actually does:
    below for why this stage doesn't composite onto a background itself.
 5. **Upscale** *(conditional, not yet implemented)* - only when the cropped
    image's long edge is below a quality threshold.
-6. **RenderVariants** - produces `original.png` (the served master) plus
-   `thumb`/`card`/`zoom` in both WebP and JPEG, for *both* paths. The CLEAN
-   path composites `cutout.png` onto the neutral background + contact shadow
-   (`composeOntoNeutralBackground`) to get an opaque `original.png`; the KEEP
-   path just auto-orients and re-encodes the raw upload (no compositing - the
-   image's own background *is* the content). Both then resize into the fixed
-   size set. Every serving-facing asset is opaque; `cutout.png` is the only
-   thing that stays transparent. Returns a manifest of every variant
+6. **RenderVariants** - produces `original.webp` (the served master, WebP
+   q92) plus `thumb`/`card`/`zoom` in both WebP and JPEG, for *both* paths.
+   The CLEAN path composites `cutout.png` onto the neutral background +
+   contact shadow (`composeOntoNeutralBackground`) to get the opaque master;
+   the KEEP path just auto-orients the raw upload (no compositing - the
+   image's own background *is* the content). Both then encode the master to
+   WebP and resize into the fixed size set. The served master is WebP, not
+   PNG, on purpose: the KEEP path's raw upload is often a photographic JPEG
+   (marketing graphic, lifestyle shot) and re-encoding that to PNG bloats it
+   5-10x for no gain - the lossless re-derivation sources are `cutout.png`
+   (CLEAN) and the retained `raw.*` (both), never `original.*`. Every
+   serving-facing asset is opaque; `cutout.png` is the only thing that stays
+   transparent. Returns a manifest of every variant
    (name/format/key/dimensions/bytes) for `ReportResult`.
-7. **ReportResult** *(not yet implemented)* - calls
-   `sureplug-backend`'s `POST /media/internal/pipeline-result` with the
-   outcome (`READY` + the rendered variants, or `NEEDS_REUPLOAD` + a reason),
-   authenticated with a shared secret header. This is what both terminal
-   `PipelineComplete` / `NeedsReupload` placeholder states become.
+7. **ReportResult** - calls `sureplug-backend`'s
+   `POST /media/internal/pipeline-result` with the outcome (`READY` + the
+   rendered variant manifest, or `NEEDS_REUPLOAD` + a reason -
+   `too_blurry` / `no_product_detected` / `background_removal_failed`),
+   authenticated with the `X-Media-Pipeline-Secret` shared-secret header
+   (`MEDIA_PIPELINE_WEBHOOK_SECRET`, must match the backend's value). Every
+   terminal branch - both render paths, the blur rejection, and the crop
+   rejection - routes through a `reportResult` Task (with a `States.ALL`
+   retry/backoff so a transient network blip doesn't strand a finished
+   execution) before the single `PipelineComplete` success state. The
+   backend usecase is a no-op unless the file is still `PROCESSING`, so
+   retries and duplicate deliveries are safe.
 
 ## RemoveBackground correlation & webhook verification
 
@@ -165,7 +178,7 @@ Given that, **`CropSubject` deliberately does not composite onto a
 background at all** - it writes the transparent, cropped cutout to
 `cutout.png`. Compositing (background + shadow, via
 `composeOntoNeutralBackground`) happens in `RenderVariants` instead, which
-produces the opaque served `original.png` and the sizes from it. Keeping
+produces the opaque served `original.webp` and the sizes from it. Keeping
 `cutout.png` around means a future backdrop change (a confirmed `Paper`
 value, theme-aware backgrounds, a different shadow style) only needs
 `RenderVariants` re-run against the cutout already in S3 - never the
@@ -213,7 +226,9 @@ Defined in `serverless.yml` via the `serverless-step-functions` plugin
 the state machine and the Lambda definitions it references in one place.
 Currently `ClassifyImage` -> a Choice going straight to
 `RenderVariantsPassthrough` (classifier said KEEP) or on to `BlurCheck` ->
-`RemoveBackground` -> `CropSubject` -> a Choice going to `NeedsReupload` or
-`RenderVariantsComposite`. Both render paths end at a stand-in
-`PipelineComplete` success state; `NeedsReupload` is also a stand-in.
-`ReportResult` is what all three terminal states become once it's built.
+`RemoveBackground` -> `CropSubject` -> a Choice going to `ReportNeedsReupload`
+or `RenderVariantsComposite`. A too-blurry image routes to `ReportTooBlurry`.
+Both render paths converge on `ReportReady`. All three `Report*` states are
+the `reportResult` Lambda (retry/backoff on `States.ALL`) and then flow into
+the single `PipelineComplete` success state. The only stage still missing is
+the conditional `Upscale`.

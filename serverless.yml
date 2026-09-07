@@ -26,6 +26,8 @@ provider:
     CONTACT_SHADOW_HEIGHT_RATIO: ${env:CONTACT_SHADOW_HEIGHT_RATIO, '0.1'}
     CONTACT_SHADOW_BLUR_RATIO: ${env:CONTACT_SHADOW_BLUR_RATIO, '0.35'}
     CONTACT_SHADOW_OPACITY: ${env:CONTACT_SHADOW_OPACITY, '0.28'}
+    APP_INTERNAL_WEBHOOK_URL: ${env:APP_INTERNAL_WEBHOOK_URL}
+    MEDIA_PIPELINE_WEBHOOK_SECRET: ${env:MEDIA_PIPELINE_WEBHOOK_SECRET}
   iam:
     role:
       statements:
@@ -85,13 +87,16 @@ functions:
     handler: src/functions/render-variants/handler.handler
     timeout: 60
     memorySize: 1024
+  reportResult:
+    handler: src/functions/report-result/handler.handler
+    timeout: 15
 
 stepFunctions:
   stateMachines:
     mediaPipeline:
       name: ${self:service}-${sls:stage}-media-pipeline
       definition:
-        Comment: SurePlug product-image processing pipeline - classification, blur check, background-removal, cropping, and variant rendering are implemented; conditional upscale and reporting the outcome back to sureplug-backend are not
+        Comment: SurePlug product-image processing pipeline - classification, blur check, background-removal, cropping, variant rendering, and reporting the outcome back to sureplug-backend are implemented; conditional upscale is not
         StartAt: ClassifyImage
         States:
           ClassifyImage:
@@ -124,7 +129,7 @@ stepFunctions:
               keyPrefix.$: "$.keyPrefix"
               sourceKey.$: "$.rawKey"
               composite: false
-            Next: PipelineComplete
+            Next: ReportReady
           BlurCheck:
             Type: Task
             Resource:
@@ -135,10 +140,22 @@ stepFunctions:
             Choices:
               - Variable: "$.isBlurry"
                 BooleanEquals: true
-                Next: TooBlurry
+                Next: ReportTooBlurry
             Default: RemoveBackground
-          TooBlurry:
-            Type: Succeed
+          ReportTooBlurry:
+            Type: Task
+            Resource:
+              Fn::GetAtt: [reportResult, Arn]
+            Parameters:
+              fileId.$: "$.fileId"
+              outcome: NEEDS_REUPLOAD
+              reason: too_blurry
+            Retry:
+              - ErrorEquals: ["States.ALL"]
+                IntervalSeconds: 5
+                MaxAttempts: 4
+                BackoffRate: 2
+            Next: PipelineComplete
           RemoveBackground:
             Type: Task
             Resource: arn:aws:states:::lambda:invoke.waitForTaskToken
@@ -163,7 +180,7 @@ stepFunctions:
             Choices:
               - Variable: "$.needsReupload"
                 BooleanEquals: true
-                Next: NeedsReupload
+                Next: ReportNeedsReupload
             Default: RenderVariantsComposite
           RenderVariantsComposite:
             Type: Task
@@ -174,8 +191,34 @@ stepFunctions:
               keyPrefix.$: "$.keyPrefix"
               sourceKey.$: "$.cutoutKey"
               composite: true
+            Next: ReportReady
+          ReportNeedsReupload:
+            Type: Task
+            Resource:
+              Fn::GetAtt: [reportResult, Arn]
+            Parameters:
+              fileId.$: "$.fileId"
+              outcome: NEEDS_REUPLOAD
+              reason.$: "$.reviewReason"
+            Retry:
+              - ErrorEquals: ["States.ALL"]
+                IntervalSeconds: 5
+                MaxAttempts: 4
+                BackoffRate: 2
             Next: PipelineComplete
-          NeedsReupload:
-            Type: Succeed
+          ReportReady:
+            Type: Task
+            Resource:
+              Fn::GetAtt: [reportResult, Arn]
+            Parameters:
+              fileId.$: "$.fileId"
+              outcome: READY
+              variants.$: "$.variants"
+            Retry:
+              - ErrorEquals: ["States.ALL"]
+                IntervalSeconds: 5
+                MaxAttempts: 4
+                BackoffRate: 2
+            Next: PipelineComplete
           PipelineComplete:
             Type: Succeed

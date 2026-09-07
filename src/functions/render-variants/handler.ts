@@ -5,7 +5,11 @@ import {
 } from "@aws-sdk/client-s3";
 import sharp from "sharp";
 import { composeOntoNeutralBackground } from "../../shared/compose-on-neutral-background";
-import { VARIANT_SPECS, planVariantSize } from "../../shared/variant-specs";
+import {
+  VARIANT_SPECS,
+  ORIGINAL_MASTER_WEBP_QUALITY,
+  planVariantSize,
+} from "../../shared/variant-specs";
 import {
   AWS_REGION,
   MEDIA_S3_BUCKET,
@@ -23,7 +27,7 @@ export type RenderVariantsInput = {
 
 export type RenderedVariant = {
   name: "ORIGINAL" | "THUMB" | "CARD" | "ZOOM";
-  format: "PNG" | "WEBP" | "JPEG";
+  format: "WEBP" | "JPEG";
   storageKey: string;
   width: number;
   height: number;
@@ -78,15 +82,18 @@ export async function handler(
   const folder = `${event.keyPrefix}/${event.fileId}`;
   const variants: RenderedVariant[] = [];
 
-  const originalKey = `${folder}/original.png`;
-  await putVariant(originalKey, master, "image/png");
+  const original = await sharp(master)
+    .webp({ quality: ORIGINAL_MASTER_WEBP_QUALITY })
+    .toBuffer();
+  const originalKey = `${folder}/original.webp`;
+  await putVariant(originalKey, original, "image/webp");
   variants.push({
     name: "ORIGINAL",
-    format: "PNG",
+    format: "WEBP",
     storageKey: originalKey,
     width: masterWidth,
     height: masterHeight,
-    sizeBytes: master.length,
+    sizeBytes: original.length,
   });
 
   for (const spec of VARIANT_SPECS) {

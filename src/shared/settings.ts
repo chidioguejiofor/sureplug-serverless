@@ -43,3 +43,8 @@ export const CONTACT_SHADOW_BLUR_RATIO = Number(
 export const CONTACT_SHADOW_OPACITY = Number(
   process.env.CONTACT_SHADOW_OPACITY || 0.28
 );
+
+export const APP_INTERNAL_WEBHOOK_URL = process.env
+  .APP_INTERNAL_WEBHOOK_URL as string;
+export const MEDIA_PIPELINE_WEBHOOK_SECRET = process.env
+  .MEDIA_PIPELINE_WEBHOOK_SECRET as string;

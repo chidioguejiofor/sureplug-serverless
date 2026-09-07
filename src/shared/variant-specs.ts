@@ -5,6 +5,8 @@ export type VariantSpec = {
   jpegQuality: number;
 };
 
+export const ORIGINAL_MASTER_WEBP_QUALITY = 92;
+
 export const VARIANT_SPECS: VariantSpec[] = [
   { name: "THUMB", longEdge: 300, webpQuality: 75, jpegQuality: 80 },
   { name: "CARD", longEdge: 600, webpQuality: 80, jpegQuality: 83 },
