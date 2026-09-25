@@ -7,6 +7,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "tdd": "vitest",
+    "templates": "tsx src/email-templates/cli/command.ts",
     "package": "serverless package",
     "deploy": "serverless deploy",
     "deploy:dev": "serverless deploy --stage dev",
@@ -14,6 +15,7 @@
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1126.0",
+    "@aws-sdk/client-ses": "^3.1140.0",
     "@aws-sdk/client-sfn": "^3.1126.0",
     "@aws-sdk/s3-request-presigner": "^3.1126.0",
     "sharp": "^0.33.5"
@@ -21,9 +23,12 @@
   "devDependencies": {
     "@types/aws-lambda": "^8.10.145",
     "@types/node": "^22.0.0",
+    "@types/prompts": "^2.4.9",
+    "prompts": "^2.4.2",
     "serverless": "^4.41.1",
     "serverless-esbuild": "^1.55.0",
     "serverless-step-functions": "^3.21.0",
+    "tsx": "^4.23.15",
     "typescript": "^5.6.3",
     "vitest": "^4.1.11"
   }
