@@ -1,3 +1,4 @@
+import "dotenv/config";
 import prompts from "prompts";
 import { TEMPLATE_NAME_TO_FILE_MAPPER } from "../settings";
 import { createOrUpdateTemplate, sendTestEmail } from "../usecases";

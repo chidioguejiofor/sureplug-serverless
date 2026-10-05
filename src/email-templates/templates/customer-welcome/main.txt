@@ -1,0 +1,37 @@
+SUREPLUG
+
+Welcome to SurePlug, {{firstName}}
+
+SurePlug brings trusted merchants across Nigeria into one marketplace. Shop from as many of them as you like, pay once, and let our own dispatch riders bring everything to your door.
+
+GETTING STARTED
+
+1. Browse and search freely. Look around as much as you like - you only need to sign in when you're ready to pay.
+
+2. Fill one cart. Items from different merchants can sit side by side, and you choose exactly which of them to pay for.
+
+3. Track every order. Follow it from the merchant getting it ready to a SurePlug rider on the way to you.
+
+4. Confirm it arrived. We text you a delivery code on handover. Enter it yourself in the app once your items are in your hands - never read it out to anyone before then, not even the rider.
+
+BUYER PROTECTION ON EVERY ORDER
+
+Once you confirm delivery, we hold your payment for up to 48 hours before the merchant is paid. If something arrives damaged or isn't what you ordered, open a dispute with photos or a video inside that window and our team will review it.
+
+{{ctaLabel}}: {{ctaLink}}
+
+---
+
+SurePlug - https://sureplugmarket.com
+
+Questions? Email support@sureplugmarket.com
+
+Instagram: https://instagram.com/sureplug
+X: https://x.com/sureplug
+Facebook: https://facebook.com/sureplug
+
+Privacy Policy: https://sureplugmarket.com/privacy
+Terms of Service: https://sureplugmarket.com/terms
+
+You're receiving this because you have a SurePlug account.
+(c) SurePlug. All rights reserved.
