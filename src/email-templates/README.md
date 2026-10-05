@@ -16,6 +16,8 @@ into `serverless.yml`.
    - `main.txt` - the plaintext fallback.
    - `emailData.json` - sample data used by the CLI's "send test email"
      action.
+   - `assets/` - optional. Any images the template references - see "Images"
+     below.
 2. Register it in `settings.ts`'s `TEMPLATE_NAME_TO_FILE_MAPPER`, e.g.:
    ```ts
    export const TEMPLATE_NAME_TO_FILE_MAPPER = {
@@ -34,10 +36,40 @@ into `serverless.yml`.
 ## Images
 
 Images are hosted on CloudFront and referenced by absolute HTTPS URL - email
-clients can't resolve relative paths, and SES won't host assets for you. The
-base is `https://dkd8gmstqydrg.cloudfront.net/email/`, and the naming
-convention is `<template-folder>-<slot>.png`
-(e.g. `customer-welcome-hero.png`).
+clients can't resolve relative paths, and SES won't host assets for you. A
+template's images live in its own `templates/<template-name>/assets/` folder
+and are served at
+`https://dkd8gmstqydrg.cloudfront.net/email/<template-name>/<file>`
+- one folder per template, mirroring the CloudFront path exactly, so the
+whole folder uploads together and there's never a question of which images
+belong to which template. `templates/customer-welcome/assets/hero.png` is the
+reference: it's served at `.../email/customer-welcome/hero.png`.
+
+Each image's source is an SVG next to the PNG actually uploaded - the SVG is
+what you edit; the PNG is a build artifact regenerated from it with `sharp`,
+already a dependency of this repo:
+
+```bash
+node -e "require('sharp')('src/email-templates/templates/customer-welcome/assets/hero.svg') \
+  .resize(640,440).png({compressionLevel:9}) \
+  .toFile('src/email-templates/templates/customer-welcome/assets/hero.png')"
+```
+
+Then sync the whole folder to the bucket behind that CloudFront distribution,
+preserving the `<template-name>/<file>` structure:
+
+```bash
+aws s3 sync src/email-templates/templates/customer-welcome/assets/ \
+  s3://<your-bucket>/email/customer-welcome/ \
+  --exclude "*.svg" \
+  --content-type image/png \
+  --cache-control "public, max-age=31536000, immutable"
+```
+
+Nothing in this repo deploys assets - that sync is a manual step, and the
+template will show broken images until it happens. Note the long cache
+lifetime: replacing a PNG at the same path needs a CloudFront invalidation,
+or viewers keep seeing the old file for up to a year.
 
 Rules for any image added to a template:
 
