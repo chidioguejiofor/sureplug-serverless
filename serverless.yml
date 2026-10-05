@@ -268,3 +268,6 @@ stepFunctions:
             Next: PipelineComplete
           PipelineComplete:
             Type: Succeed
+
+resources:
+  - ${file(resources/notification-dispatch-schedule.yml)}
