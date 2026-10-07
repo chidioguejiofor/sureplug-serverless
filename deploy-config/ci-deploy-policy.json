@@ -119,8 +119,8 @@
         "events:UpdateApiDestination"
       ],
       "Resource": [
-        "arn:aws:events:*:*:connection/sureplug-notification-dispatch-*/*",
-        "arn:aws:events:*:*:api-destination/sureplug-notification-dispatch-*/*"
+        "arn:aws:events:*:*:connection/sureplug-notification-dispatch-*",
+        "arn:aws:events:*:*:api-destination/sureplug-notification-dispatch-*"
       ]
     },
     {
@@ -140,12 +140,13 @@
       "Sid": "EventBridgeApiDestinationServiceLinkedRole",
       "Effect": "Allow",
       "Action": "iam:CreateServiceLinkedRole",
-      "Resource": "arn:aws:iam::*:role/aws-service-role/apidestinations.events.amazonaws.com/AWSServiceRoleForAmazonEventBridgeApiDestinations",
-      "Condition": {
-        "StringEquals": {
-          "iam:AWSServiceName": "apidestinations.events.amazonaws.com"
-        }
-      }
+      "Resource": "arn:aws:iam::*:role/aws-service-role/apidestinations.events.amazonaws.com/AWSServiceRoleForAmazonEventBridgeApiDestinations"
+    },
+    {
+      "Sid": "ApiGatewayServiceLinkedRole",
+      "Effect": "Allow",
+      "Action": "iam:CreateServiceLinkedRole",
+      "Resource": "arn:aws:iam::*:role/aws-service-role/ops.apigateway.amazonaws.com/AWSServiceRoleForAPIGateway"
     },
     {
       "Sid": "EventBridgeScheduler",
