@@ -55,7 +55,7 @@
       "Resource": "arn:aws:lambda:*:*:function:sureplug-media-pipeline-*"
     },
     {
-      "Sid": "IamForLambdaAndSchedulerRoles",
+      "Sid": "IamForStackServiceRoles",
       "Effect": "Allow",
       "Action": [
         "iam:CreateRole",
@@ -70,13 +70,17 @@
       "Resource": "arn:aws:iam::*:role/sureplug-media-pipeline-*"
     },
     {
-      "Sid": "PassRoleToLambdaAndScheduler",
+      "Sid": "PassRoleToStackServices",
       "Effect": "Allow",
       "Action": "iam:PassRole",
       "Resource": "arn:aws:iam::*:role/sureplug-media-pipeline-*",
       "Condition": {
         "StringEquals": {
-          "iam:PassedToService": ["lambda.amazonaws.com", "scheduler.amazonaws.com"]
+          "iam:PassedToService": [
+            "lambda.amazonaws.com",
+            "events.amazonaws.com",
+            "states.amazonaws.com"
+          ]
         }
       }
     },
@@ -149,15 +153,17 @@
       "Resource": "arn:aws:iam::*:role/aws-service-role/ops.apigateway.amazonaws.com/AWSServiceRoleForAPIGateway"
     },
     {
-      "Sid": "EventBridgeScheduler",
+      "Sid": "EventBridgeScheduledRule",
       "Effect": "Allow",
       "Action": [
-        "scheduler:CreateSchedule",
-        "scheduler:DeleteSchedule",
-        "scheduler:GetSchedule",
-        "scheduler:UpdateSchedule"
+        "events:PutRule",
+        "events:DeleteRule",
+        "events:DescribeRule",
+        "events:PutTargets",
+        "events:RemoveTargets",
+        "events:ListTargetsByRule"
       ],
-      "Resource": "arn:aws:scheduler:*:*:schedule/default/notification-outbox-dispatch-*"
+      "Resource": "arn:aws:events:*:*:rule/notification-outbox-dispatch-*"
     },
     {
       "Sid": "ApiGatewayHttpApi",

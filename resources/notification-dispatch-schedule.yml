@@ -19,7 +19,7 @@ Resources:
       InvocationEndpoint: ${env:NOTIFICATION_DISPATCH_URL}
       InvocationRateLimitPerSecond: 1
 
-  NotificationDispatchSchedulerRole:
+  NotificationDispatchRuleRole:
     Type: AWS::IAM::Role
     Properties:
       AssumeRolePolicyDocument:
@@ -27,7 +27,7 @@ Resources:
         Statement:
           - Effect: Allow
             Principal:
-              Service: scheduler.amazonaws.com
+              Service: events.amazonaws.com
             Action: sts:AssumeRole
       Policies:
         - PolicyName: invoke-notification-dispatch
@@ -39,15 +39,15 @@ Resources:
                 Resource:
                   Fn::GetAtt: [NotificationDispatchDestination, Arn]
 
-  NotificationDispatchSchedule:
-    Type: AWS::Scheduler::Schedule
+  NotificationDispatchRule:
+    Type: AWS::Events::Rule
     Properties:
       Name: notification-outbox-dispatch-${sls:stage}
       ScheduleExpression: rate(1 minute)
-      FlexibleTimeWindow:
-        Mode: 'OFF'
-      Target:
-        Arn:
-          Fn::GetAtt: [NotificationDispatchDestination, Arn]
-        RoleArn:
-          Fn::GetAtt: [NotificationDispatchSchedulerRole, Arn]
+      State: ENABLED
+      Targets:
+        - Id: notification-dispatch
+          Arn:
+            Fn::GetAtt: [NotificationDispatchDestination, Arn]
+          RoleArn:
+            Fn::GetAtt: [NotificationDispatchRuleRole, Arn]
