@@ -2,6 +2,9 @@ service: sureplug-media-pipeline
 
 frameworkVersion: '4'
 
+build:
+  esbuild: false
+
 provider:
   name: aws
   runtime: nodejs24.x

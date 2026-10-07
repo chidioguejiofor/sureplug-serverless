@@ -45,6 +45,7 @@ jobs:
       id-token: write
       contents: read
     env:
+      SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }}
       AWS_REGION: ${{ vars.AWS_REGION }}
       MEDIA_S3_BUCKET: ${{ vars.MEDIA_S3_BUCKET }}
       BACKGROUND_REMOVAL_MODEL_VERSION: ${{ vars.BACKGROUND_REMOVAL_MODEL_VERSION }}
