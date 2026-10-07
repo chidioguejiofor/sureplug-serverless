@@ -74,7 +74,7 @@ jobs:
         run: git checkout "$COMMIT_SHA"
       - uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: "24"
           cache: "npm"
       - run: npm ci
       - uses: aws-actions/configure-aws-credentials@v4
