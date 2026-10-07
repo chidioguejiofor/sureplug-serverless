@@ -34,7 +34,7 @@ jobs:
 
   deploy-staging:
     name: Deploy to staging
-    if: github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/chore-deploy-serverless'
+    if: github.ref == 'refs/heads/dev'
     needs: [typecheck, unit-tests]
     runs-on: ubuntu-latest
     environment: staging
