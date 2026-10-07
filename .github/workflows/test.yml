@@ -1,0 +1,80 @@
+name: Test
+
+on:
+  push:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  typecheck:
+    name: Typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+      - run: npm ci
+      - run: npm run typecheck
+
+  unit-tests:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+      - run: npm ci
+      - run: npm test
+
+  deploy-staging:
+    name: Deploy to staging
+    if: github.ref == 'refs/heads/dev'
+    needs: [typecheck, unit-tests]
+    runs-on: ubuntu-latest
+    environment: staging
+    concurrency:
+      group: staging-deploy
+      cancel-in-progress: true
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      MEDIA_S3_BUCKET: ${{ vars.MEDIA_S3_BUCKET }}
+      BACKGROUND_REMOVAL_MODEL_VERSION: ${{ vars.BACKGROUND_REMOVAL_MODEL_VERSION }}
+      REMOVE_BACKGROUND_CALLBACK_BASE_URL: ${{ vars.REMOVE_BACKGROUND_CALLBACK_BASE_URL }}
+      IMAGE_CLASSIFIER_MODEL_VERSION: ${{ vars.IMAGE_CLASSIFIER_MODEL_VERSION }}
+      CLASSIFY_IMAGE_CALLBACK_BASE_URL: ${{ vars.CLASSIFY_IMAGE_CALLBACK_BASE_URL }}
+      UPSCALE_MODEL_VERSION: ${{ vars.UPSCALE_MODEL_VERSION }}
+      UPSCALE_CALLBACK_BASE_URL: ${{ vars.UPSCALE_CALLBACK_BASE_URL }}
+      APP_INTERNAL_WEBHOOK_URL: ${{ vars.APP_INTERNAL_WEBHOOK_URL }}
+      NOTIFICATION_DISPATCH_URL: ${{ vars.NOTIFICATION_DISPATCH_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+      - run: npm ci
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - name: Fetch secrets from AWS Secrets Manager
+        run: |
+          aws secretsmanager get-secret-value \
+            --secret-id sureplug-serverless/staging \
+            --query SecretString --output text \
+            | jq -r 'to_entries[] | "\(.key)=\(.value)"' \
+            | while IFS='=' read -r key value; do
+                echo "::add-mask::$value"
+                echo "$key=$value" >> "$GITHUB_ENV"
+              done
+      - name: Deploy
+        run: npx serverless deploy --stage staging

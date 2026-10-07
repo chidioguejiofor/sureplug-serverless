@@ -1,0 +1,53 @@
+Resources:
+  NotificationDispatchConnection:
+    Type: AWS::Events::Connection
+    Properties:
+      Name: sureplug-notification-dispatch-${sls:stage}
+      AuthorizationType: API_KEY
+      AuthParameters:
+        ApiKeyAuthParameters:
+          ApiKeyName: x-notification-dispatch-secret
+          ApiKeyValue: ${env:NOTIFICATION_DISPATCH_SECRET}
+
+  NotificationDispatchDestination:
+    Type: AWS::Events::ApiDestination
+    Properties:
+      Name: sureplug-notification-dispatch-${sls:stage}
+      ConnectionArn:
+        Fn::GetAtt: [NotificationDispatchConnection, Arn]
+      HttpMethod: POST
+      InvocationEndpoint: ${env:NOTIFICATION_DISPATCH_URL}
+      InvocationRateLimitPerSecond: 1
+
+  NotificationDispatchSchedulerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: scheduler.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: invoke-notification-dispatch
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: events:InvokeApiDestination
+                Resource:
+                  Fn::GetAtt: [NotificationDispatchDestination, Arn]
+
+  NotificationDispatchSchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: notification-outbox-dispatch-${sls:stage}
+      ScheduleExpression: rate(1 minute)
+      FlexibleTimeWindow:
+        Mode: 'OFF'
+      Target:
+        Arn:
+          Fn::GetAtt: [NotificationDispatchDestination, Arn]
+        RoleArn:
+          Fn::GetAtt: [NotificationDispatchSchedulerRole, Arn]
