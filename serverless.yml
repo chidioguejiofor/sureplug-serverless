@@ -11,6 +11,8 @@ provider:
   architecture: arm64
   region: ${env:AWS_REGION, 'eu-west-2'}
   stage: ${opt:stage, 'dev'}
+  deploymentBucket:
+    name: sureplug-serverless-deployment-${sls:stage}
   environment:
     MEDIA_S3_BUCKET: ${env:MEDIA_S3_BUCKET}
     BLUR_SCORE_THRESHOLD: ${env:BLUR_SCORE_THRESHOLD, '100'}
