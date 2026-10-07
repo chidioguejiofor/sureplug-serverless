@@ -184,19 +184,44 @@ finish() {
 # Replace the example below. Set TOTAL_STAGES to match the stages you write.
 # ──────────────────────────────────────────────────────────────────────────
 
-TOTAL_STAGES=3
+TOTAL_STAGES=4
+ENV_FILE="${ENV_FILE:-.env}"
 
-banner "AWS: Serverless Framework deployment bucket"
-say "Provisions the S3 bucket Serverless Framework v4 uploads deploy artifacts"
-say "to, for one stage (staging or production)."
-note "Safe to re-run: bucket creation and versioning are both idempotent."
-note "IAM policy attachment for the deploy role lives in sureplug-backend's"
-note "scripts/aws/create-deploy-iam-roles.sh, not here - run that for permissions."
+GITHUB_ORG="chidioguejiofor"
+SERVERLESS_REPO="sureplug-serverless"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+POLICY_FILE="$SCRIPT_DIR/../../deploy-config/ci-deploy-policy.json"
+PERMISSIONS_POLICY_NAME="sureplug-serverless-ci-deploy"
+ROLE_NAMES=(
+  "sureplug-serverless-deploy-staging"
+  "sureplug-serverless-deploy-production"
+)
+ROLE_ENVS=(
+  "staging"
+  "production"
+)
+ROLE_ENV_KEYS=(
+  "DEPLOY_ROLE_ARN_SERVERLESS_STAGING"
+  "DEPLOY_ROLE_ARN_SERVERLESS_PRODUCTION"
+)
 
-# ── Stage 1: sign in ─────────────────────────────────────────────────────────
+banner "AWS: GitHub OIDC deploy IAM roles"
+say "This creates the 2 IAM roles that let GitHub Actions deploy sureplug-serverless"
+say "to staging/production — trust-scoped to a specific repo + GitHub Environment,"
+say "so the IAM trust boundary and the Environment's required-reviewer approval"
+say "reinforce each other."
+note "sureplug-backend provisions its own deploy IAM roles from its own"
+note "scripts/aws/create-deploy-iam-roles.sh - this script is serverless-only."
+note "Unlike backend's EB-targeted policy, deploy-config/ci-deploy-policy.json"
+note "here is already a complete, literal document (Lambda/CloudFormation/S3/"
+note "Step Functions, scoped to the sureplug-media-pipeline service) - no"
+note "placeholder substitution needed, so it's applied as-is."
+
+# ── Stage 1: sign in ────────────────────────────────────────────────────────
 stage "Sign in to AWS (aws login)"
-say "Same sign-in as this repo's other scripts/aws/*.sh scripts - if you've"
-say "already signed in recently, this skips through."
+say "Same sign-in flow as sureplug-backend's equivalent script. If your"
+say "session from that run is still active (sessions last up to 12h), this"
+say "will skip straight through."
 
 if ! command -v aws >/dev/null 2>&1; then
   warn "aws CLI not found on PATH."
@@ -227,77 +252,173 @@ if ! CALLER_JSON=$(aws sts get-caller-identity --output json 2>&1); then
   fi
 fi
 
+ACCOUNT_ID=$(printf '%s' "$CALLER_JSON" | grep -o '"Account"[^,}]*' | grep -o '[0-9]\{12\}')
 CALLER_ARN=$(printf '%s' "$CALLER_JSON" | grep -o '"Arn"[^,}]*' | sed -E 's/.*"Arn"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/')
 say "Authenticated as:"
 note "  Profile:  $AWS_PROFILE"
+note "  Account:  $ACCOUNT_ID"
 note "  Identity: $CALLER_ARN"
-if ! confirm "Is this the right AWS identity/account for SurePlug?"; then
+warn "Double-check this is the correct SurePlug AWS account before continuing."
+if ! confirm "Is this the right AWS account for SurePlug staging/production?"; then
   say "Stopping. Run 'aws logout --profile $AWS_PROFILE', sign in as the right"
   say "identity with 'aws login --profile $AWS_PROFILE', and re-run."
   exit 1
 fi
 write_env AWS_PROFILE_NAME "$AWS_PROFILE_NAME"
 
-ask AWS_REGION_NAME "AWS region [eu-west-2]:"
-AWS_REGION_NAME="${AWS_REGION_NAME:-eu-west-2}"
-export AWS_DEFAULT_REGION="$AWS_REGION_NAME"
-write_env AWS_REGION "$AWS_REGION_NAME"
+# ── Stage 2: locate the OIDC provider ───────────────────────────────────────
+stage "Locate the GitHub OIDC provider"
+say "Each role's trust policy federates to this provider. sureplug-backend's"
+say "scripts/aws/create-github-oidc-provider.sh creates it once per AWS"
+say "account - the same provider is shared across every repo's deploy roles."
 
-# ── Stage 2: which environment ───────────────────────────────────────────────
-stage "Choose the environment"
-
-say "This run provisions exactly one stage's bucket and role. Re-run the"
-say "script later for the other one - staging and production are fully"
-say "independent here."
-while true; do
-  ask TARGET_STAGE "Which environment: staging or production?"
-  case "$TARGET_STAGE" in
-    staging|production) break ;;
-    *) warn "Type exactly 'staging' or 'production'." ;;
-  esac
-done
-BUCKET_NAME="sureplug-serverless-deployment-${TARGET_STAGE}"
-note "Working on: $TARGET_STAGE"
-note "  Bucket: $BUCKET_NAME"
-
-# ── Stage 3: provision the bucket ────────────────────────────────────────────
-stage "Provision $TARGET_STAGE bucket"
-
-say "Checking whether $BUCKET_NAME already exists..."
-if aws s3api head-bucket --bucket "$BUCKET_NAME" 2>/dev/null; then
-  note "Bucket already exists - skipping creation."
-else
-  say "Creating bucket $BUCKET_NAME in $AWS_REGION_NAME..."
-  if CREATE_ERR=$(aws s3api create-bucket \
-        --bucket "$BUCKET_NAME" \
-        --region "$AWS_REGION_NAME" \
-        --create-bucket-configuration LocationConstraint="$AWS_REGION_NAME" 2>&1); then
-    printf '  %s✓ created%s bucket %s\n' "$GREEN" "$RESET" "$BUCKET_NAME"
-  else
-    warn "Failed to create bucket $BUCKET_NAME:"
-    note "$CREATE_ERR"
-    SKIPPED+=("S3 bucket $BUCKET_NAME (create it by hand, then re-run)")
-  fi
+EXISTING_ARNS=$(aws iam list-open-id-connect-providers --query 'OpenIDConnectProviderList[].Arn' --output text 2>/dev/null || true)
+OIDC_PROVIDER_ARN=""
+if [[ -n "$EXISTING_ARNS" ]]; then
+  OIDC_PROVIDER_ARN=$(printf '%s\n' "$EXISTING_ARNS" | tr '\t' '\n' | grep 'token.actions.githubusercontent.com' | head -n1 || true)
 fi
 
-say "Enabling versioning on $BUCKET_NAME (required by Serverless's code"
-say "storage mode; safe to re-run even if already enabled)..."
-if VERSION_ERR=$(aws s3api put-bucket-versioning \
-      --bucket "$BUCKET_NAME" \
-      --versioning-configuration Status=Enabled 2>&1); then
-  printf '  %s✓ versioning enabled%s on %s\n' "$GREEN" "$RESET" "$BUCKET_NAME"
-else
-  warn "Failed to enable versioning on $BUCKET_NAME:"
-  note "$VERSION_ERR"
-  SKIPPED+=("S3 versioning on $BUCKET_NAME (enable it by hand)")
+if [[ -z "$OIDC_PROVIDER_ARN" ]]; then
+  warn "No GitHub OIDC provider found in account $ACCOUNT_ID."
+  say "Run sureplug-backend's scripts/aws/create-github-oidc-provider.sh"
+  say "first, then re-run this script."
+  exit 1
 fi
+note "Found: $OIDC_PROVIDER_ARN"
 
+# ── Stage 3: create/update the 2 roles ──────────────────────────────────────
+stage "Create the 2 deploy IAM roles + trust policies"
+say "Each trust policy allows sts:AssumeRoleWithWebIdentity only for GitHub"
+say "Actions jobs whose OIDC token has this exact subject claim:"
+note "  <repo OIDC subject prefix>:environment:<staging|production>"
+note "  (the prefix is read from GitHub, since newer repos use immutable numeric IDs)"
 say ""
-say "Next:"
-say "  - Re-run this script with the other stage whenever its bucket is ready"
-say "    to be provisioned too."
-say "  - Run sureplug-backend's scripts/aws/create-deploy-iam-roles.sh (or"
-say "    re-run it) to attach deploy-config/ci-deploy-policy.json - which"
-say "    grants access to this bucket - to the sureplug-serverless-deploy-$TARGET_STAGE role."
+say "Roles to create/update in account $ACCOUNT_ID:"
+for i in "${!ROLE_NAMES[@]}"; do
+  note "  ${ROLE_NAMES[$i]}  (repo:$GITHUB_ORG/$SERVERLESS_REPO:environment:${ROLE_ENVS[$i]})"
+done
+say ""
+say "Each role also gets $POLICY_FILE applied as-is"
+say "(inline policy $PERMISSIONS_POLICY_NAME)."
+
+if [[ ! -f "$POLICY_FILE" ]]; then
+  warn "$POLICY_FILE not found - run this script from the repo it ships in."
+  exit 1
+fi
+
+if ! confirm "Create/update these 2 roles now?"; then
+  say "Stopping without changes."
+  exit 1
+fi
+
+TMP_DIR=$(mktemp -d)
+trap 'rm -rf "$TMP_DIR"' EXIT
+
+oidc_subject_prefix() {
+  local repo="$1" prefix
+  if ! command -v gh >/dev/null 2>&1; then
+    printf 'gh CLI not found on PATH'
+    return 1
+  fi
+  if ! prefix=$(gh api "repos/$repo/actions/oidc/customization/sub" \
+        --jq 'select(.use_immutable_subject) | .sub_claim_prefix' 2>&1); then
+    printf '%s' "$prefix"
+    return 1
+  fi
+  printf '%s' "${prefix:-repo:$repo}"
+}
+
+attach_permissions_policy() {
+  local role_name="$1"
+  if ! PUT_ERR=$(aws iam put-role-policy \
+        --role-name "$role_name" \
+        --policy-name "$PERMISSIONS_POLICY_NAME" \
+        --policy-document "file://$POLICY_FILE" 2>&1); then
+    warn "Failed to attach $PERMISSIONS_POLICY_NAME to $role_name:"
+    note "$PUT_ERR"
+    exit 1
+  fi
+  printf '  %s✓ attached%s %s to %s\n' "$GREEN" "$RESET" "$PERMISSIONS_POLICY_NAME" "$role_name"
+}
+
+for i in "${!ROLE_NAMES[@]}"; do
+  name="${ROLE_NAMES[$i]}"
+  repo="$GITHUB_ORG/$SERVERLESS_REPO"
+  envname="${ROLE_ENVS[$i]}"
+  if ! subject_prefix=$(oidc_subject_prefix "$repo"); then
+    warn "Could not read the GitHub OIDC subject for $repo:"
+    note "$subject_prefix"
+    say "Refusing to write a trust policy that GitHub's tokens would not match."
+    say "Run 'gh auth login' (or 'gh auth status' to see which account is broken) and re-run."
+    exit 1
+  fi
+  subject="$subject_prefix:environment:$envname"
+  note "Trust subject for $name: $subject"
+  policy_file="$TMP_DIR/$name.json"
+
+  cat > "$policy_file" <<JSON
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": { "Federated": "$OIDC_PROVIDER_ARN" },
+      "Action": "sts:AssumeRoleWithWebIdentity",
+      "Condition": {
+        "StringEquals": {
+          "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
+          "token.actions.githubusercontent.com:sub": "$subject"
+        }
+      }
+    }
+  ]
+}
+JSON
+
+  if aws iam get-role --role-name "$name" >/dev/null 2>&1; then
+    note "Role $name already exists — updating its trust policy."
+    if ! UPDATE_ERR=$(aws iam update-assume-role-policy --role-name "$name" --policy-document "file://$policy_file" 2>&1); then
+      warn "Failed to update trust policy for $name:"
+      note "$UPDATE_ERR"
+      exit 1
+    fi
+    printf '  %s✓ updated%s trust policy for %s\n' "$GREEN" "$RESET" "$name"
+  else
+    say "Creating $name..."
+    if ! CREATE_ERR=$(aws iam create-role \
+          --role-name "$name" \
+          --assume-role-policy-document "file://$policy_file" \
+          --description "GitHub Actions OIDC deploy role: $repo ($envname)" \
+          --tags Key=Project,Value=SurePlug Key=Repo,Value="$SERVERLESS_REPO" Key=Environment,Value="$envname" \
+          --output json 2>&1); then
+      warn "Failed to create $name:"
+      note "$CREATE_ERR"
+      say "Common cause: your IAM identity lacks iam:CreateRole / iam:TagRole."
+      exit 1
+    fi
+    printf '  %s✓ created%s %s\n' "$GREEN" "$RESET" "$name"
+  fi
+  attach_permissions_policy "$name"
+  aws iam tag-role --role-name "$name" \
+    --tags Key=Project,Value=SurePlug Key=Repo,Value="$SERVERLESS_REPO" Key=Environment,Value="$envname" \
+    >/dev/null 2>&1 || true
+done
+
+# ── Stage 4: verify + record ARNs ───────────────────────────────────────────
+stage "Verify and record role ARNs"
+say "Reading back each role to confirm it exists and capture its ARN."
+
+for i in "${!ROLE_NAMES[@]}"; do
+  name="${ROLE_NAMES[$i]}"
+  key="${ROLE_ENV_KEYS[$i]}"
+  if ! ROLE_JSON=$(aws iam get-role --role-name "$name" --output json 2>&1); then
+    warn "Could not read back $name:"
+    note "$ROLE_JSON"
+    exit 1
+  fi
+  arn=$(printf '%s' "$ROLE_JSON" | grep -o '"Arn"[^,}]*' | head -n1 | sed -E 's/.*"Arn"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/')
+  note "$name → $arn"
+  write_env "$key" "$arn"
+done
 
 finish
