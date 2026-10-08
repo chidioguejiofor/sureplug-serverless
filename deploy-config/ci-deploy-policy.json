@@ -16,7 +16,6 @@
         "cloudformation:DescribeChangeSet",
         "cloudformation:ExecuteChangeSet",
         "cloudformation:DeleteChangeSet",
-        "cloudformation:ValidateTemplate",
         "cloudformation:GetTemplate",
         "cloudformation:ListStackResources",
         "cloudformation:CancelUpdateStack",
@@ -25,21 +24,28 @@
       "Resource": "arn:aws:cloudformation:*:*:stack/sureplug-media-pipeline-*/*"
     },
     {
-      "Sid": "DeploymentBucket",
+      "Sid": "AccountWideReadOnly",
       "Effect": "Allow",
       "Action": [
-        "s3:CreateBucket",
+        "cloudformation:ValidateTemplate",
+        "logs:DescribeLogGroups",
+        "states:ListStateMachines"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "ServerlessFrameworkDeploymentBucket",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetBucketLocation",
         "s3:ListBucket",
         "s3:PutObject",
         "s3:GetObject",
-        "s3:DeleteObject",
-        "s3:PutBucketPolicy",
-        "s3:PutEncryptionConfiguration",
-        "s3:PutBucketTagging"
+        "s3:DeleteObject"
       ],
       "Resource": [
-        "arn:aws:s3:::sureplug-media-pipeline-*",
-        "arn:aws:s3:::sureplug-media-pipeline-*/*"
+        "arn:aws:s3:::sureplug-serverless-deployment-*",
+        "arn:aws:s3:::sureplug-serverless-deployment-*/*"
       ]
     },
     {
@@ -49,7 +55,7 @@
       "Resource": "arn:aws:lambda:*:*:function:sureplug-media-pipeline-*"
     },
     {
-      "Sid": "IamForLambdaAndSchedulerRoles",
+      "Sid": "IamForStackServiceRoles",
       "Effect": "Allow",
       "Action": [
         "iam:CreateRole",
@@ -64,13 +70,17 @@
       "Resource": "arn:aws:iam::*:role/sureplug-media-pipeline-*"
     },
     {
-      "Sid": "PassRoleToLambdaAndScheduler",
+      "Sid": "PassRoleToStackServices",
       "Effect": "Allow",
       "Action": "iam:PassRole",
       "Resource": "arn:aws:iam::*:role/sureplug-media-pipeline-*",
       "Condition": {
         "StringEquals": {
-          "iam:PassedToService": ["lambda.amazonaws.com", "scheduler.amazonaws.com"]
+          "iam:PassedToService": [
+            "lambda.amazonaws.com",
+            "events.amazonaws.com",
+            "states.amazonaws.com"
+          ]
         }
       }
     },
@@ -80,7 +90,6 @@
       "Action": [
         "logs:CreateLogGroup",
         "logs:DeleteLogGroup",
-        "logs:DescribeLogGroups",
         "logs:PutRetentionPolicy",
         "logs:TagLogGroup",
         "logs:TagResource"
@@ -95,7 +104,6 @@
         "states:DeleteStateMachine",
         "states:DescribeStateMachine",
         "states:UpdateStateMachine",
-        "states:ListStateMachines",
         "states:TagResource",
         "states:UntagResource"
       ],
@@ -115,21 +123,47 @@
         "events:UpdateApiDestination"
       ],
       "Resource": [
-        "arn:aws:events:*:*:connection/sureplug-notification-dispatch-*/*",
-        "arn:aws:events:*:*:api-destination/sureplug-notification-dispatch-*/*"
+        "arn:aws:events:*:*:connection/sureplug-notification-dispatch-*",
+        "arn:aws:events:*:*:api-destination/sureplug-notification-dispatch-*"
       ]
     },
     {
-      "Sid": "EventBridgeScheduler",
+      "Sid": "EventBridgeConnectionSecret",
       "Effect": "Allow",
       "Action": [
-        "scheduler:CreateSchedule",
-        "scheduler:DeleteSchedule",
-        "scheduler:GetSchedule",
-        "scheduler:UpdateSchedule",
-        "scheduler:TagResource"
+        "secretsmanager:CreateSecret",
+        "secretsmanager:UpdateSecret",
+        "secretsmanager:DeleteSecret",
+        "secretsmanager:GetSecretValue",
+        "secretsmanager:PutSecretValue",
+        "secretsmanager:TagResource"
       ],
-      "Resource": "arn:aws:scheduler:*:*:schedule/default/notification-outbox-dispatch-*"
+      "Resource": "arn:aws:secretsmanager:*:*:secret:events!connection/sureplug-notification-dispatch-*"
+    },
+    {
+      "Sid": "EventBridgeApiDestinationServiceLinkedRole",
+      "Effect": "Allow",
+      "Action": "iam:CreateServiceLinkedRole",
+      "Resource": "arn:aws:iam::*:role/aws-service-role/apidestinations.events.amazonaws.com/AWSServiceRoleForAmazonEventBridgeApiDestinations"
+    },
+    {
+      "Sid": "ApiGatewayServiceLinkedRole",
+      "Effect": "Allow",
+      "Action": "iam:CreateServiceLinkedRole",
+      "Resource": "arn:aws:iam::*:role/aws-service-role/ops.apigateway.amazonaws.com/AWSServiceRoleForAPIGateway"
+    },
+    {
+      "Sid": "EventBridgeScheduledRule",
+      "Effect": "Allow",
+      "Action": [
+        "events:PutRule",
+        "events:DeleteRule",
+        "events:DescribeRule",
+        "events:PutTargets",
+        "events:RemoveTargets",
+        "events:ListTargetsByRule"
+      ],
+      "Resource": "arn:aws:events:*:*:rule/notification-outbox-dispatch-*"
     },
     {
       "Sid": "ApiGatewayHttpApi",
