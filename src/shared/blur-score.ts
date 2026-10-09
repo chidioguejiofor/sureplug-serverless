@@ -9,25 +9,26 @@ export function computeBlurScore(
     );
   }
 
-  const responses: number[] = [];
+  let responseCount = 0;
+  let mean = 0;
+  let sumOfSquaredDeviations = 0;
+
   for (let y = 1; y < height - 1; y++) {
     for (let x = 1; x < width - 1; x++) {
       const idx = y * width + x;
-      const value =
+      const response =
         -4 * pixels[idx] +
         pixels[idx - 1] +
         pixels[idx + 1] +
         pixels[idx - width] +
         pixels[idx + width];
-      responses.push(value);
+
+      responseCount++;
+      const deviationFromPreviousMean = response - mean;
+      mean += deviationFromPreviousMean / responseCount;
+      sumOfSquaredDeviations += deviationFromPreviousMean * (response - mean);
     }
   }
 
-  const mean =
-    responses.reduce((sum, value) => sum + value, 0) / responses.length;
-  const variance =
-    responses.reduce((sum, value) => sum + (value - mean) ** 2, 0) /
-    responses.length;
-
-  return variance;
+  return sumOfSquaredDeviations / responseCount;
 }

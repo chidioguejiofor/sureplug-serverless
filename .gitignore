@@ -3,3 +3,4 @@ dist/
 .serverless/
 .env
 *.log
+replicate-testing/results
