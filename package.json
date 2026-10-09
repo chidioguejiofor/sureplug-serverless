@@ -5,13 +5,17 @@
   "description": "SurePlug product-image processing pipeline (Step Functions + Lambda), deployed with Serverless Framework",
   "scripts": {
     "typecheck": "tsc --noEmit",
+    "typecheck:replicate-testing": "tsc --noEmit -p tsconfig.testing.json",
     "test": "vitest run",
     "tdd": "vitest",
     "templates": "tsx src/email-templates/cli/command.ts",
     "package": "serverless package",
     "deploy": "serverless deploy",
     "deploy:dev": "serverless deploy --stage dev",
-    "remove": "serverless remove"
+    "remove": "serverless remove",
+    "replicate:samples": "tsx replicate-testing/fetch-samples.ts",
+    "replicate:test": "tsx replicate-testing/run.ts",
+    "replicate:localcheck": "tsx replicate-testing/localcheck.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1126.0",
